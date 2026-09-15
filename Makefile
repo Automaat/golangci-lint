@@ -93,6 +93,10 @@ bench_baseline:
 		$(BENCH_ARGS)
 .PHONY: bench_baseline
 
+bench_compare:
+	go run ./scripts/bench/compare $(COMPARE_ARGS)
+.PHONY: bench_compare
+
 hyperfine:
 	@which hyperfine > /dev/null || (echo "Please install hyperfine https://github.com/sharkdp/hyperfine#installation" && exit 1)
 .PHONY: hyperfine

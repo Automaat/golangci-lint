@@ -56,6 +56,17 @@ Artifacts:
 - `logs/`: verbose golangci-lint output.
 - `profiles/`: CPU, heap, and runtime trace captures.
 
+Compare JSON diagnostics from reference and candidate binaries:
+
+```bash
+make bench_compare COMPARE_ARGS='--reference /tmp/reference.json --candidate /tmp/candidate.json --workload-root /absolute/workload --reference-exit 1 --candidate-exit 1 --out dist/bench/comparison'
+```
+
+The comparator normalizes the workload root, sorts diagnostics and report
+metadata, compares exit codes, and writes both normalized outputs plus a JSON
+summary. Generate inputs sequentially with isolated caches and the baseline
+harness resource limits.
+
 ## Benchmark one linter: with a local version
 
 ```bash
