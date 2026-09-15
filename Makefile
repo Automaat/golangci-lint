@@ -81,6 +81,18 @@ bench_version: hyperfine
 	@./scripts/bench/bench_version.sh $(LINTER) $(VERSION_OLD) $(VERSION_NEW)
 .PHONY: bench_version
 
+BENCH_FORK_BIN ?= $(CURDIR)/dist/bench/bin/fork
+
+bench_baseline:
+	mkdir -p $(dir $(BENCH_FORK_BIN))
+	go build -trimpath -ldflags '-s -w' -o $(BENCH_FORK_BIN) ./cmd/golangci-lint
+	go run ./scripts/bench/baseline \
+		--manifest scripts/bench/baseline.json \
+		--fork-bin $(BENCH_FORK_BIN) \
+		$(if $(UPSTREAM_BIN),--upstream-bin $(UPSTREAM_BIN)) \
+		$(BENCH_ARGS)
+.PHONY: bench_baseline
+
 hyperfine:
 	@which hyperfine > /dev/null || (echo "Please install hyperfine https://github.com/sharkdp/hyperfine#installation" && exit 1)
 .PHONY: hyperfine
