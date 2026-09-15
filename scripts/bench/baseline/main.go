@@ -1154,22 +1154,22 @@ func (r *runner) newBenchmarkCommand(
 	}
 }
 
-func startCommand(ctx context.Context, cmd *exec.Cmd) (chan struct{}, int32, error) {
+func startCommand(ctx context.Context, cmd *exec.Cmd) (finished chan struct{}, rootPID int32, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, fmt.Errorf("start benchmark command: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, 0, fmt.Errorf("start benchmark command: %w", err)
 	}
-	if cmd.Process.Pid <= 0 || cmd.Process.Pid > math.MaxInt32 {
+	rootPID, err = checkedPID(cmd.Process.Pid)
+	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 
-		return nil, 0, fmt.Errorf("benchmark PID exceeds supported range: %d", cmd.Process.Pid)
+		return nil, 0, err
 	}
-	rootPID := int32(cmd.Process.Pid)
 
-	finished := make(chan struct{})
+	finished = make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -1179,6 +1179,14 @@ func startCommand(ctx context.Context, cmd *exec.Cmd) (chan struct{}, int32, err
 	}()
 
 	return finished, rootPID, nil
+}
+
+func checkedPID(pid int) (int32, error) {
+	if pid <= 0 || pid > math.MaxInt32 {
+		return 0, fmt.Errorf("benchmark PID exceeds supported range: %d", pid)
+	}
+
+	return int32(pid), nil
 }
 
 func commandExitCode(err error) (int, error) {

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"io"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +20,7 @@ func TestStartCommandStopsAtTimeout(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	cmd := exec.Command("/bin/sleep", "30")
+	cmd := exec.CommandContext(ctx, "/bin/sleep", "30")
 	finished, _, err := startCommand(ctx, cmd)
 	if err != nil {
 		t.Fatal(err)
@@ -34,13 +33,14 @@ func TestStartCommandStopsAtTimeout(t *testing.T) {
 
 func TestTrackPeakTreeRSSStopsAtLimit(t *testing.T) {
 	pid := os.Getpid()
-	if pid <= 0 || pid > math.MaxInt32 {
-		t.Fatalf("test PID exceeds supported range: %d", pid)
+	rootPID, err := checkedPID(pid)
+	if err != nil {
+		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stop := make(chan struct{})
-	statsCh := trackPeakTreeRSS(ctx, int32(pid), bytesPerMiB, cancel, stop)
+	statsCh := trackPeakTreeRSS(ctx, rootPID, bytesPerMiB, cancel, stop)
 	stats := <-statsCh
 	close(stop)
 	if !stats.exceeded {
