@@ -102,6 +102,17 @@ func TestParseCacheModes(t *testing.T) {
 	}
 }
 
+func TestFilterTargets(t *testing.T) {
+	actual := filterTargets([]string{".", "scripts/tool"}, "scripts/tool")
+	expected := []string{"scripts/tool"}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("expected %v, got %v", expected, actual)
+	}
+	if actual := filterTargets([]string{"."}, "missing"); actual != nil {
+		t.Fatalf("expected no target, got %v", actual)
+	}
+}
+
 func TestValidateManifest(t *testing.T) {
 	m := manifest{
 		SchemaVersion: schemaVersion,

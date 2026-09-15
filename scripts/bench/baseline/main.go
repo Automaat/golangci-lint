@@ -73,6 +73,7 @@ type options struct {
 	UpstreamBin        string
 	OutputDir          string
 	Workload           string
+	Module             string
 	Scenario           string
 	Concurrency        string
 	CacheMode          string
@@ -253,7 +254,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	workloads, err := prepareWorkloads(ctx, m.Workloads, outDir, opts.Workload)
+	workloads, err := prepareWorkloads(ctx, m.Workloads, outDir, opts.Workload, opts.Module)
 	if err != nil {
 		return err
 	}
@@ -348,6 +349,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.UpstreamBin, "upstream-bin", "", "upstream binary")
 	fs.StringVar(&opts.OutputDir, "out", "", "artifact directory")
 	fs.StringVar(&opts.Workload, "workload", "", "workload name filter")
+	fs.StringVar(&opts.Module, "module", "", "module path filter")
 	fs.StringVar(&opts.Scenario, "scenario", "", "scenario name filter")
 	fs.StringVar(&opts.Concurrency, "concurrency", "", "comma-separated concurrency values")
 	fs.StringVar(&opts.CacheMode, "cache-mode", "cold,warm", "cold, warm, or both")
@@ -580,25 +582,52 @@ func prepareOutputDir(path string) (string, error) {
 	return abs, nil
 }
 
-func prepareWorkloads(ctx context.Context, configured []workload, outDir, filter string) ([]preparedWorkload, error) {
+func prepareWorkloads(ctx context.Context, configured []workload, outDir, workloadFilter, moduleFilter string) ([]preparedWorkload, error) {
 	var workloads []preparedWorkload
+	matchedWorkload := false
 	for i := range configured {
 		item := &configured[i]
-		if filter != "" && item.Name != filter {
+		if workloadFilter != "" && item.Name != workloadFilter {
 			continue
 		}
+		matchedWorkload = true
 
 		prepared, err := prepareWorkload(ctx, item, filepath.Join(outDir, "workloads", item.Name))
 		if err != nil {
 			return nil, fmt.Errorf("prepare workload %q: %w", item.Name, err)
 		}
+		if moduleFilter != "" {
+			prepared.Targets = filterTargets(prepared.Targets, moduleFilter)
+			if len(prepared.Targets) == 0 {
+				continue
+			}
+			if !slices.Contains(prepared.Targets, prepared.ProfileModule) {
+				prepared.ProfileModule = prepared.Targets[0]
+			}
+		}
 		workloads = append(workloads, prepared)
 	}
 	if len(workloads) == 0 {
-		return nil, fmt.Errorf("unknown workload %q", filter)
+		if !matchedWorkload {
+			return nil, fmt.Errorf("unknown workload %q", workloadFilter)
+		}
+		if moduleFilter != "" {
+			return nil, fmt.Errorf("unknown module %q", moduleFilter)
+		}
+		return nil, fmt.Errorf("unknown workload %q", workloadFilter)
 	}
 
 	return workloads, nil
+}
+
+func filterTargets(configured []string, filter string) []string {
+	for _, target := range configured {
+		if target == filter {
+			return []string{target}
+		}
+	}
+
+	return nil
 }
 
 func prepareWorkload(ctx context.Context, item *workload, destination string) (preparedWorkload, error) {
