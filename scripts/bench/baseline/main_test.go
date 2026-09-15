@@ -72,6 +72,31 @@ func TestParseOptionsRejectsUnsafeLimits(t *testing.T) {
 	}
 }
 
+func TestParseOptionsCompatibilityRequirements(t *testing.T) {
+	valid := []string{
+		"--compatibility",
+		"--fork-bin", "fork",
+		"--upstream-bin", "upstream",
+		"--workload", "small",
+		"--concurrency", "1",
+	}
+	if _, err := parseOptions(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"--compatibility", "--upstream-bin", "upstream", "--workload", "small", "--concurrency", "1"},
+		{"--compatibility", "--fork-bin", "fork", "--workload", "small", "--concurrency", "1"},
+		{"--compatibility", "--fork-bin", "fork", "--upstream-bin", "upstream", "--concurrency", "1"},
+		{"--compatibility", "--fork-bin", "fork", "--upstream-bin", "upstream", "--workload", "small"},
+		append(slices.Clone(valid), "--profiles"),
+	} {
+		if _, err := parseOptions(args); err == nil {
+			t.Fatalf("expected %v to fail", args)
+		}
+	}
+}
+
 func TestParsePositiveInts(t *testing.T) {
 	actual, err := parsePositiveInts("1, 2,4,2")
 	if err != nil {
@@ -191,6 +216,19 @@ func TestArtifactBase(t *testing.T) {
 		"timing",
 	)
 	expected := "fork-multi-scripts_tool-configured-j4-i2-cold-timing"
+	if actual != expected {
+		t.Fatalf("expected %q, got %q", expected, actual)
+	}
+}
+
+func TestCompatibilityCaseBase(t *testing.T) {
+	actual := compatibilityCaseBase(
+		&preparedWorkload{workload: workload{Name: "multi"}},
+		"scripts/tool",
+		scenario{Name: "goanalysis"},
+		2,
+	)
+	expected := "multi-scripts_tool-goanalysis-j2"
 	if actual != expected {
 		t.Fatalf("expected %q, got %q", expected, actual)
 	}

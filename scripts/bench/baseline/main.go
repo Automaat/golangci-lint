@@ -24,6 +24,8 @@ import (
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
+
+	"github.com/golangci/golangci-lint/v2/scripts/bench/internal/diagnostics"
 )
 
 const (
@@ -79,6 +81,7 @@ type options struct {
 	CacheMode          string
 	Runs               int
 	Profiles           bool
+	Compatibility      bool
 	Prepare            bool
 	ProfileConcurrency int
 	RunTimeout         time.Duration
@@ -355,6 +358,7 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.CacheMode, "cache-mode", "cold,warm", "cold, warm, or both")
 	fs.IntVar(&opts.Runs, "runs", 0, "runs per case; manifest value by default")
 	fs.BoolVar(&opts.Profiles, "profiles", false, "capture separate CPU, heap, and trace profiles")
+	fs.BoolVar(&opts.Compatibility, "compatibility", false, "compare diagnostics from fork and upstream binaries")
 	fs.BoolVar(&opts.Prepare, "prepare", true, "prewarm the Go build and module caches")
 	fs.IntVar(&opts.ProfileConcurrency, "profile-concurrency", defaultProfileConcurrency, "concurrency for profile runs")
 	fs.DurationVar(&opts.RunTimeout, "run-timeout", defaultRunTimeout, "hard timeout for each golangci-lint process")
@@ -367,35 +371,63 @@ func parseOptions(args []string) (options, error) {
 	if fs.NArg() != 0 {
 		return options{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	if opts.ForkBin == "" && opts.UpstreamBin == "" {
-		return options{}, errors.New("at least one of --fork-bin or --upstream-bin is required")
-	}
-	if opts.Runs < 0 {
-		return options{}, errors.New("--runs cannot be negative")
-	}
-	if opts.ProfileConcurrency < 1 {
-		return options{}, errors.New("--profile-concurrency must be positive")
-	}
-	if opts.RunTimeout <= 0 {
-		return options{}, errors.New("--run-timeout must be positive")
-	}
-	if opts.MaxRSSMiB == 0 {
-		return options{}, errors.New("--max-rss-mib must be positive")
-	}
-	if opts.MaxRSSMiB > math.MaxUint64/bytesPerMiB {
-		return options{}, errors.New("--max-rss-mib is too large")
-	}
-	if opts.GoMaxProcs < 1 {
-		return options{}, errors.New("--go-max-procs must be positive")
-	}
-	if opts.Nice < 0 || opts.Nice > 20 {
-		return options{}, errors.New("--nice must be between 0 and 20")
-	}
-	if _, err := parseCacheModes(opts.CacheMode); err != nil {
+	if err := validateOptions(&opts); err != nil {
 		return options{}, err
 	}
 
 	return opts, nil
+}
+
+func validateOptions(opts *options) error {
+	if opts.ForkBin == "" && opts.UpstreamBin == "" {
+		return errors.New("at least one of --fork-bin or --upstream-bin is required")
+	}
+	if opts.Runs < 0 {
+		return errors.New("--runs cannot be negative")
+	}
+	if opts.ProfileConcurrency < 1 {
+		return errors.New("--profile-concurrency must be positive")
+	}
+	if opts.RunTimeout <= 0 {
+		return errors.New("--run-timeout must be positive")
+	}
+	if opts.MaxRSSMiB == 0 {
+		return errors.New("--max-rss-mib must be positive")
+	}
+	if opts.MaxRSSMiB > math.MaxUint64/bytesPerMiB {
+		return errors.New("--max-rss-mib is too large")
+	}
+	if opts.GoMaxProcs < 1 {
+		return errors.New("--go-max-procs must be positive")
+	}
+	if opts.Nice < 0 || opts.Nice > 20 {
+		return errors.New("--nice must be between 0 and 20")
+	}
+	if _, err := parseCacheModes(opts.CacheMode); err != nil {
+		return err
+	}
+
+	return validateCompatibilityOptions(opts)
+}
+
+func validateCompatibilityOptions(opts *options) error {
+	if !opts.Compatibility {
+		return nil
+	}
+	if opts.ForkBin == "" || opts.UpstreamBin == "" {
+		return errors.New("--compatibility requires --fork-bin and --upstream-bin")
+	}
+	if opts.Workload == "" {
+		return errors.New("--compatibility requires an explicit --workload")
+	}
+	if opts.Concurrency == "" {
+		return errors.New("--compatibility requires explicit --concurrency values")
+	}
+	if opts.Profiles {
+		return errors.New("--compatibility cannot capture profiles")
+	}
+
+	return nil
 }
 
 func loadManifest(path string) (manifest, []byte, error) {
@@ -573,7 +605,7 @@ func prepareOutputDir(path string) (string, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("stat output directory: %w", err)
 	}
-	for _, dir := range []string{"logs", "profiles", "cache", "workloads"} {
+	for _, dir := range []string{"logs", "profiles", "cache", "workloads", "compat/raw"} {
 		if err := os.MkdirAll(filepath.Join(abs, dir), privateDirMode); err != nil {
 			return "", fmt.Errorf("create output directory: %w", err)
 		}
@@ -850,6 +882,9 @@ func collectMetadata(
 }
 
 func (r *runner) runAll(concurrency []int, runs int) error {
+	if r.opts.Compatibility {
+		return r.runCompatibility(concurrency)
+	}
 	if err := r.runTimingMatrix(concurrency, runs); err != nil {
 		return err
 	}
@@ -870,14 +905,14 @@ func (r *runner) runTimingMatrix(concurrency []int, runs int) error {
 					for _, bin := range r.binaries {
 						if r.opts.Prepare {
 							cacheDir := r.cacheDir(bin, workload, target, scenario, value, "prepare")
-							if err := r.execute(bin, workload, target, scenario, value, 0, "prepare", "prepare", cacheDir, ""); err != nil {
+							if _, err := r.execute(bin, workload, target, scenario, value, 0, "prepare", "prepare", cacheDir, ""); err != nil {
 								return err
 							}
 						}
 						for _, mode := range modes {
 							if mode == "warm" {
 								cacheDir := r.cacheDir(bin, workload, target, scenario, value, "warm")
-								if err := r.execute(bin, workload, target, scenario, value, 0, mode, "warm-seed", cacheDir, ""); err != nil {
+								if _, err := r.execute(bin, workload, target, scenario, value, 0, mode, "warm-seed", cacheDir, ""); err != nil {
 									return err
 								}
 							}
@@ -887,12 +922,59 @@ func (r *runner) runTimingMatrix(concurrency []int, runs int) error {
 									cacheKey = fmt.Sprintf("cold-%d", iteration)
 								}
 								cacheDir := r.cacheDir(bin, workload, target, scenario, value, cacheKey)
-								if err := r.execute(bin, workload, target, scenario, value, iteration, mode, "timing", cacheDir, ""); err != nil {
+								if _, err := r.execute(bin, workload, target, scenario, value, iteration, mode, "timing", cacheDir, ""); err != nil {
 									return err
 								}
 							}
 						}
 					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (r *runner) runCompatibility(concurrency []int) error {
+	binaries := make(map[string]binary, len(r.binaries))
+	for _, bin := range r.binaries {
+		binaries[bin.Label] = bin
+	}
+
+	for i := range r.workloads {
+		workload := &r.workloads[i]
+		for _, target := range workload.Targets {
+			for _, scenario := range r.scenarios {
+				for _, value := range concurrency {
+					inputs := make(map[string]diagnostics.Input, len(binaries))
+					for _, label := range []string{"upstream", "fork"} {
+						bin := binaries[label]
+						base := artifactBase(bin, workload, target, scenario, value, 1, "cold", "compatibility")
+						artifact := filepath.Join(r.outDir, "compat", "raw", base+".json")
+						cacheDir := r.cacheDir(bin, workload, target, scenario, value, "compatibility")
+						stats, err := r.execute(
+							bin, workload, target, scenario, value, 1, "cold", "compatibility", cacheDir, artifact,
+							"--issues-exit-code=1", "--show-stats=false", "--output.json.path="+artifact,
+						)
+						if err != nil {
+							return err
+						}
+						inputs[label] = diagnostics.Input{Path: artifact, ExitCode: stats.exitCode}
+					}
+
+					caseName := compatibilityCaseBase(workload, target, scenario, value)
+					outputDir := filepath.Join(r.outDir, "compat", caseName)
+					summary, err := diagnostics.CompareFiles(
+						inputs["upstream"], inputs["fork"], workload.Root, outputDir,
+					)
+					if err != nil {
+						return fmt.Errorf("compare %s: %w", caseName, err)
+					}
+					_, _ = fmt.Fprintf(
+						os.Stdout, "compatibility %s: %d issues, exit code %d\n",
+						caseName, summary.ReferenceIssues, summary.ReferenceExit,
+					)
 				}
 			}
 		}
@@ -929,7 +1011,7 @@ func (r *runner) runProfiles() error {
 					artifact := filepath.Join(r.outDir, "profiles", base+"."+profile.ext)
 					cacheDir := r.cacheDir(bin, workload, target, scenario, r.opts.ProfileConcurrency, profile.purpose)
 					extra := append(slices.Clone(profile.env), profile.flag+"="+artifact)
-					if err := r.execute(
+					if _, err := r.execute(
 						bin, workload, target, scenario, r.opts.ProfileConcurrency,
 						1, "cold", profile.purpose, cacheDir, artifact, extra...,
 					); err != nil {
@@ -969,30 +1051,30 @@ func (r *runner) execute(
 	cacheDir string,
 	artifact string,
 	extra ...string,
-) error {
+) (*executionStats, error) {
 	if err := os.MkdirAll(cacheDir, privateDirMode); err != nil {
-		return fmt.Errorf("create cache directory: %w", err)
+		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
 	workDir, err := safeJoin(workload.Root, target)
 	if err != nil {
-		return fmt.Errorf("resolve workload target: %w", err)
+		return nil, fmt.Errorf("resolve workload target: %w", err)
 	}
 	args, err := buildRunArgs(workload, scenario, concurrency, r.opts.RunTimeout, extra)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	base := artifactBase(bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose)
 	logPath := filepath.Join(r.outDir, "logs", base+".log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, privateFileMode)
 	if err != nil {
-		return fmt.Errorf("create benchmark log: %w", err)
+		return nil, fmt.Errorf("create benchmark log: %w", err)
 	}
 	defer logFile.Close()
 
 	cacheBefore, err := directorySize(cacheDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	runCtx, cancel := context.WithTimeout(r.ctx, r.opts.RunTimeout)
@@ -1003,7 +1085,7 @@ func (r *runner) execute(
 	started := time.Now()
 	finished, rootPID, startErr := startCommand(runCtx, cmd)
 	if startErr != nil {
-		return startErr
+		return nil, startErr
 	}
 	stopMemory := make(chan struct{})
 	peakMemory := trackPeakTreeRSS(
@@ -1027,11 +1109,11 @@ func (r *runner) execute(
 
 	exitCode, err := commandExitCode(waitErr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cacheAfter, err := directorySize(cacheDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var userCPU, systemCPU time.Duration
@@ -1054,7 +1136,11 @@ func (r *runner) execute(
 		args:              args,
 	}
 
-	return r.recordExecution(bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose, &stats)
+	if err := r.recordExecution(bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose, &stats); err != nil {
+		return nil, err
+	}
+
+	return &stats, nil
 }
 
 func (r *runner) recordExecution(
@@ -1102,7 +1188,7 @@ func (r *runner) recordExecution(
 	if stats.terminationReason != "" {
 		return fmt.Errorf("benchmark command stopped by %s; see %s", stats.terminationReason, stats.logPath)
 	}
-	if stats.exitCode != 0 {
+	if stats.exitCode != 0 && purpose != "compatibility" {
 		return fmt.Errorf("benchmark command exited with %d; see %s", stats.exitCode, stats.logPath)
 	}
 
@@ -1122,9 +1208,13 @@ func buildRunArgs(
 		"-v",
 		"--timeout=" + runTimeout.String(),
 		"--allow-serial-runners",
-		"--issues-exit-code=0",
 		"--fix=false",
 		fmt.Sprintf("--concurrency=%d", concurrency),
+	}
+	if !slices.ContainsFunc(extra, func(value string) bool {
+		return strings.HasPrefix(value, "--issues-exit-code=")
+	}) {
+		args = append(args, "--issues-exit-code=0")
 	}
 	if scenario.UseConfig {
 		if workload.ConfigPath == "" {
@@ -1254,6 +1344,20 @@ func artifactBase(
 		fmt.Sprintf("i%d", iteration),
 		safeName(cacheMode),
 		safeName(purpose),
+	}, "-")
+}
+
+func compatibilityCaseBase(
+	workload *preparedWorkload,
+	target string,
+	scenario scenario,
+	concurrency int,
+) string {
+	return strings.Join([]string{
+		safeName(workload.Name),
+		safeName(target),
+		safeName(scenario.Name),
+		fmt.Sprintf("j%d", concurrency),
 	}, "-")
 }
 
