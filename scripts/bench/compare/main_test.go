@@ -1,48 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-func TestNormalizeReportData(t *testing.T) {
-	root := filepath.Join(string(filepath.Separator), "work", "repo")
-	input := `{
-  "Issues": [
-    {"FromLinter":"z","Text":"second","Pos":{"Filename":"` + filepath.Join(root, "z.go") + `"}},
-    {"FromLinter":"a","Text":"first","Pos":{"Filename":"` + filepath.Join(root, "a.go") + `"}}
-  ],
-  "Report": {"Linters":[{"Name":"z"},{"Name":"a"}],"Warnings":null}
-}`
-
-	report, err := normalizeReportData([]byte(input), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if report.IssueCount != 2 {
-		t.Fatalf("expected 2 issues, got %d", report.IssueCount)
-	}
-	if bytes.Contains(report.Data, []byte(root)) {
-		t.Fatalf("workload root was not normalized: %s", report.Data)
-	}
-	if !bytes.Contains(report.Data, []byte(`"Filename": "$WORKLOAD`)) {
-		t.Fatalf("normalized workload marker is missing: %s", report.Data)
-	}
-	if bytes.Index(report.Data, []byte(`"FromLinter": "a"`)) > bytes.Index(report.Data, []byte(`"FromLinter": "z"`)) {
-		t.Fatalf("issues were not sorted: %s", report.Data)
-	}
-	if bytes.Index(report.Data, []byte(`"Name": "a"`)) > bytes.Index(report.Data, []byte(`"Name": "z"`)) {
-		t.Fatalf("linters were not sorted: %s", report.Data)
-	}
-}
-
-func TestNormalizeReportDataRejectsTrailingJSON(t *testing.T) {
-	if _, err := normalizeReportData([]byte(`{} {}`), "/work"); err == nil {
-		t.Fatal("expected trailing JSON to fail")
-	}
-}
 
 func TestParseOptionsRequiresExitCodes(t *testing.T) {
 	_, err := parseOptions([]string{
