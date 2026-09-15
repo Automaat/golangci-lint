@@ -1154,19 +1154,19 @@ func (r *runner) newBenchmarkCommand(
 	}
 }
 
-func startCommand(ctx context.Context, cmd *exec.Cmd) (finished chan struct{}, rootPID int32, err error) {
-	if err := ctx.Err(); err != nil {
-		return nil, 0, fmt.Errorf("start benchmark command: %w", err)
+func startCommand(ctx context.Context, cmd *exec.Cmd) (finished chan struct{}, rootPID int32, startErr error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, 0, fmt.Errorf("start benchmark command: %w", ctxErr)
 	}
-	if err := cmd.Start(); err != nil {
-		return nil, 0, fmt.Errorf("start benchmark command: %w", err)
+	if cmdErr := cmd.Start(); cmdErr != nil {
+		return nil, 0, fmt.Errorf("start benchmark command: %w", cmdErr)
 	}
-	rootPID, err = checkedPID(cmd.Process.Pid)
-	if err != nil {
+	rootPID, startErr = checkedPID(cmd.Process.Pid)
+	if startErr != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 
-		return nil, 0, err
+		return nil, 0, startErr
 	}
 
 	finished = make(chan struct{})
