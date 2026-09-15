@@ -34,6 +34,20 @@ Run a quick smoke benchmark:
 make bench_baseline BENCH_ARGS='--workload small --scenario goanalysis --concurrency 1 --runs 1'
 ```
 
+The manifest includes focused `govet`, `staticcheck`, `unused`, and
+`staticcheck-unused` scenarios. Compare them with the combined `goanalysis`
+scenario to isolate fact-cache and shared-IR costs:
+
+```bash
+make bench_baseline BENCH_ARGS='--workload large --scenario staticcheck-unused --concurrency 4'
+```
+
+Select one module from a multi-module workload with an exact path filter:
+
+```bash
+make bench_baseline BENCH_ARGS='--workload multi-module --module scripts/gen_github_action_config --concurrency 1,2,4,8'
+```
+
 Capture profiles separately from timing samples:
 
 ```bash
