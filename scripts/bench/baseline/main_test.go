@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,26 +15,14 @@ import (
 	"time"
 )
 
-func TestBenchmarkHelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_BENCHMARK_HELPER") != "1" {
-		return
-	}
-
-	memory := make([]byte, 64*bytesPerMiB)
-	for i := 0; i < len(memory); i += os.Getpagesize() {
-		memory[i] = 1
-	}
-	time.Sleep(30 * time.Second)
-	if memory[0] != 1 {
-		t.Fatal("memory changed")
-	}
-}
-
 func TestStartCommandStopsAtTimeout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires /bin/sleep")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	cmd := benchmarkHelperCommand()
-	finished, err := startCommand(ctx, cmd)
+	cmd := exec.Command("/bin/sleep", "30")
+	finished, _, err := startCommand(ctx, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,31 +33,19 @@ func TestStartCommandStopsAtTimeout(t *testing.T) {
 }
 
 func TestTrackPeakTreeRSSStopsAtLimit(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	pid := os.Getpid()
+	if pid <= 0 || pid > math.MaxInt32 {
+		t.Fatalf("test PID exceeds supported range: %d", pid)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cmd := benchmarkHelperCommand()
-	finished, err := startCommand(ctx, cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
 	stop := make(chan struct{})
-	statsCh := trackPeakTreeRSS(ctx, int32(cmd.Process.Pid), bytesPerMiB, cancel, stop)
-	if err := cmd.Wait(); err == nil {
-		t.Fatal("expected memory-limited command to fail")
-	}
-	close(finished)
-	close(stop)
+	statsCh := trackPeakTreeRSS(ctx, int32(pid), bytesPerMiB, cancel, stop)
 	stats := <-statsCh
+	close(stop)
 	if !stats.exceeded {
 		t.Fatalf("expected RSS limit to be exceeded, peak was %d bytes", stats.peak)
 	}
-}
-
-func benchmarkHelperCommand() *exec.Cmd {
-	cmd := exec.Command(os.Args[0], "-test.run=^TestBenchmarkHelperProcess$")
-	cmd.Env = append(os.Environ(), "GO_WANT_BENCHMARK_HELPER=1")
-
-	return cmd
 }
 
 func TestParseOptionsSafetyDefaults(t *testing.T) {

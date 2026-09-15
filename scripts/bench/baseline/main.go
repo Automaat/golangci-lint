@@ -261,7 +261,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	metadataValue, err := collectMetadata(ctx, manifestBytes, toolchain, binaries, workloads, opts)
+	metadataValue, err := collectMetadata(ctx, manifestBytes, toolchain, binaries, workloads, &opts)
 	if err != nil {
 		return err
 	}
@@ -741,7 +741,7 @@ func collectMetadata(
 	toolchain goToolchain,
 	binaries []binary,
 	workloads []preparedWorkload,
-	opts options,
+	opts *options,
 ) (metadata, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -971,21 +971,14 @@ func (r *runner) execute(
 
 	startedAt := time.Now().UTC()
 	started := time.Now()
-	finished, startErr := startCommand(runCtx, cmd)
+	finished, rootPID, startErr := startCommand(runCtx, cmd)
 	if startErr != nil {
 		return startErr
-	}
-	if cmd.Process.Pid <= 0 || cmd.Process.Pid > math.MaxInt32 {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		close(finished)
-
-		return fmt.Errorf("benchmark PID exceeds supported range: %d", cmd.Process.Pid)
 	}
 	stopMemory := make(chan struct{})
 	peakMemory := trackPeakTreeRSS(
 		runCtx,
-		int32(cmd.Process.Pid),
+		rootPID,
 		r.opts.MaxRSSMiB*bytesPerMiB,
 		cancel,
 		stopMemory,
@@ -993,10 +986,10 @@ func (r *runner) execute(
 	waitErr := cmd.Wait()
 	close(finished)
 	close(stopMemory)
-	memoryStats := <-peakMemory
+	rssStats := <-peakMemory
 	wall := time.Since(started)
 	terminationReason := ""
-	if memoryStats.exceeded {
+	if rssStats.exceeded {
 		terminationReason = "rss_limit"
 	} else if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		terminationReason = "timeout"
@@ -1021,7 +1014,7 @@ func (r *runner) execute(
 		wall:              wall,
 		userCPU:           userCPU,
 		systemCPU:         systemCPU,
-		peakRSS:           memoryStats.peak,
+		peakRSS:           rssStats.peak,
 		cacheBefore:       cacheBefore,
 		cacheAfter:        cacheAfter,
 		exitCode:          exitCode,
@@ -1161,24 +1154,31 @@ func (r *runner) newBenchmarkCommand(
 	}
 }
 
-func startCommand(ctx context.Context, cmd *exec.Cmd) (chan struct{}, error) {
+func startCommand(ctx context.Context, cmd *exec.Cmd) (chan struct{}, int32, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("start benchmark command: %w", err)
+		return nil, 0, fmt.Errorf("start benchmark command: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start benchmark command: %w", err)
+		return nil, 0, fmt.Errorf("start benchmark command: %w", err)
 	}
+	if cmd.Process.Pid <= 0 || cmd.Process.Pid > math.MaxInt32 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+
+		return nil, 0, fmt.Errorf("benchmark PID exceeds supported range: %d", cmd.Process.Pid)
+	}
+	rootPID := int32(cmd.Process.Pid)
 
 	finished := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			killProcessTree(int32(cmd.Process.Pid))
+			killProcessTree(rootPID)
 		case <-finished:
 		}
 	}()
 
-	return finished, nil
+	return finished, rootPID, nil
 }
 
 func commandExitCode(err error) (int, error) {
