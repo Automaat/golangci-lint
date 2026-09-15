@@ -1,12 +1,99 @@
 package main
 
 import (
+	"context"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestBenchmarkHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_BENCHMARK_HELPER") != "1" {
+		return
+	}
+
+	memory := make([]byte, 64*bytesPerMiB)
+	for i := 0; i < len(memory); i += os.Getpagesize() {
+		memory[i] = 1
+	}
+	time.Sleep(30 * time.Second)
+	if memory[0] != 1 {
+		t.Fatal("memory changed")
+	}
+}
+
+func TestStartCommandStopsAtTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	cmd := benchmarkHelperCommand()
+	finished, err := startCommand(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("expected timed out command to fail")
+	}
+	close(finished)
+}
+
+func TestTrackPeakTreeRSSStopsAtLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := benchmarkHelperCommand()
+	finished, err := startCommand(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	statsCh := trackPeakTreeRSS(ctx, int32(cmd.Process.Pid), bytesPerMiB, cancel, stop)
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("expected memory-limited command to fail")
+	}
+	close(finished)
+	close(stop)
+	stats := <-statsCh
+	if !stats.exceeded {
+		t.Fatalf("expected RSS limit to be exceeded, peak was %d bytes", stats.peak)
+	}
+}
+
+func benchmarkHelperCommand() *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestBenchmarkHelperProcess$")
+	cmd.Env = append(os.Environ(), "GO_WANT_BENCHMARK_HELPER=1")
+
+	return cmd
+}
+
+func TestParseOptionsSafetyDefaults(t *testing.T) {
+	opts, err := parseOptions([]string{"--fork-bin", "fork"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.RunTimeout != defaultRunTimeout || opts.MaxRSSMiB != defaultMaxRSSMiB ||
+		opts.GoMaxProcs != defaultGoMaxProcs || opts.Nice != defaultNice {
+		t.Fatalf("unexpected safety defaults: %+v", opts)
+	}
+}
+
+func TestParseOptionsRejectsUnsafeLimits(t *testing.T) {
+	for _, args := range [][]string{
+		{"--fork-bin", "fork", "--run-timeout", "0s"},
+		{"--fork-bin", "fork", "--max-rss-mib", "0"},
+		{"--fork-bin", "fork", "--go-max-procs", "0"},
+		{"--fork-bin", "fork", "--nice", "21"},
+	} {
+		if _, err := parseOptions(args); err == nil {
+			t.Fatalf("expected %v to fail", args)
+		}
+	}
+}
 
 func TestParsePositiveInts(t *testing.T) {
 	actual, err := parsePositiveInts("1, 2,4,2")
@@ -126,6 +213,38 @@ func TestReplaceEnv(t *testing.T) {
 	expected := []string{"KEEP=value", "PATH=new", "GOROOT=new"}
 	if !reflect.DeepEqual(actual, expected) {
 		t.Fatalf("expected %v, got %v", expected, actual)
+	}
+}
+
+func TestBuildRunArgsUsesSafetyTimeout(t *testing.T) {
+	args, err := buildRunArgs(&preparedWorkload{}, scenario{}, 2, 3*time.Minute, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(args, "--timeout=3m0s") {
+		t.Fatalf("expected timeout argument, got %v", args)
+	}
+}
+
+func TestNewBenchmarkCommandAppliesLimits(t *testing.T) {
+	r := runner{
+		goRoot: "/toolchain",
+		opts: options{
+			GoMaxProcs: 2,
+			MaxRSSMiB:  2048,
+			Nice:       10,
+		},
+	}
+	cmd := r.newBenchmarkCommand(
+		binary{Path: "/bin/linter"}, "/work", "/cache", []string{"run"}, nil, io.Discard,
+	)
+	for _, expected := range []string{"GOMAXPROCS=2", "GOMEMLIMIT=2048MiB", "GOFLAGS=-p=2"} {
+		if !slices.Contains(cmd.Env, expected) {
+			t.Fatalf("expected %q in environment", expected)
+		}
+	}
+	if runtime.GOOS != "windows" && cmd.Path != "/usr/bin/nice" {
+		t.Fatalf("expected nice wrapper, got %q", cmd.Path)
 	}
 }
 

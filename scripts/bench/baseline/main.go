@@ -34,6 +34,10 @@ const (
 	privateDirMode            = 0o750
 	bytesPerMiB               = 1024 * 1024
 	rssSampleInterval         = 5 * time.Millisecond
+	defaultRunTimeout         = 5 * time.Minute
+	defaultMaxRSSMiB          = 2048
+	defaultGoMaxProcs         = 2
+	defaultNice               = 10
 )
 
 type manifest struct {
@@ -75,6 +79,10 @@ type options struct {
 	Profiles           bool
 	Prepare            bool
 	ProfileConcurrency int
+	RunTimeout         time.Duration
+	MaxRSSMiB          uint64
+	GoMaxProcs         int
+	Nice               int
 }
 
 type binary struct {
@@ -105,6 +113,16 @@ type metadata struct {
 	Binaries      []binaryMetadata   `json:"binaries"`
 	Workloads     []workloadMetadata `json:"workloads"`
 	ManifestHash  string             `json:"manifest_sha256"`
+	Limits        limitsMetadata     `json:"limits"`
+}
+
+type limitsMetadata struct {
+	RunTimeoutNS         int64  `json:"run_timeout_ns"`
+	MaxTreeRSSBytes      uint64 `json:"max_tree_rss_bytes"`
+	GoMaxProcs           int    `json:"go_max_procs"`
+	GoMemoryLimit        string `json:"go_memory_limit"`
+	GoBuildParallelism   int    `json:"go_build_parallelism"`
+	UnixSchedulingNicety int    `json:"unix_scheduling_nicety"`
 }
 
 type hostMetadata struct {
@@ -140,41 +158,48 @@ type workloadMetadata struct {
 }
 
 type result struct {
-	SchemaVersion    int       `json:"schema_version"`
-	Binary           string    `json:"binary"`
-	Workload         string    `json:"workload"`
-	WorkloadRevision string    `json:"workload_revision"`
-	Target           string    `json:"target"`
-	Scenario         string    `json:"scenario"`
-	CacheMode        string    `json:"cache_mode"`
-	Concurrency      int       `json:"concurrency"`
-	Iteration        int       `json:"iteration"`
-	Purpose          string    `json:"purpose"`
-	StartedAt        time.Time `json:"started_at"`
-	WallNS           int64     `json:"wall_ns"`
-	UserCPUNS        int64     `json:"user_cpu_ns"`
-	SystemCPUNS      int64     `json:"system_cpu_ns"`
-	PeakTreeRSSBytes uint64    `json:"peak_tree_rss_bytes"`
-	CacheBytesBefore int64     `json:"cache_bytes_before"`
-	CacheBytesAfter  int64     `json:"cache_bytes_after"`
-	ExitCode         int       `json:"exit_code"`
-	LogPath          string    `json:"log_path"`
-	ArtifactPath     string    `json:"artifact_path,omitempty"`
-	Command          []string  `json:"command"`
+	SchemaVersion     int       `json:"schema_version"`
+	Binary            string    `json:"binary"`
+	Workload          string    `json:"workload"`
+	WorkloadRevision  string    `json:"workload_revision"`
+	Target            string    `json:"target"`
+	Scenario          string    `json:"scenario"`
+	CacheMode         string    `json:"cache_mode"`
+	Concurrency       int       `json:"concurrency"`
+	Iteration         int       `json:"iteration"`
+	Purpose           string    `json:"purpose"`
+	StartedAt         time.Time `json:"started_at"`
+	WallNS            int64     `json:"wall_ns"`
+	UserCPUNS         int64     `json:"user_cpu_ns"`
+	SystemCPUNS       int64     `json:"system_cpu_ns"`
+	PeakTreeRSSBytes  uint64    `json:"peak_tree_rss_bytes"`
+	CacheBytesBefore  int64     `json:"cache_bytes_before"`
+	CacheBytesAfter   int64     `json:"cache_bytes_after"`
+	ExitCode          int       `json:"exit_code"`
+	LogPath           string    `json:"log_path"`
+	ArtifactPath      string    `json:"artifact_path,omitempty"`
+	TerminationReason string    `json:"termination_reason,omitempty"`
+	Command           []string  `json:"command"`
 }
 
 type executionStats struct {
-	startedAt    time.Time
-	wall         time.Duration
-	userCPU      time.Duration
-	systemCPU    time.Duration
-	peakRSS      uint64
-	cacheBefore  int64
-	cacheAfter   int64
-	exitCode     int
-	logPath      string
-	artifactPath string
-	args         []string
+	startedAt         time.Time
+	wall              time.Duration
+	userCPU           time.Duration
+	systemCPU         time.Duration
+	peakRSS           uint64
+	cacheBefore       int64
+	cacheAfter        int64
+	exitCode          int
+	logPath           string
+	artifactPath      string
+	terminationReason string
+	args              []string
+}
+
+type memoryStats struct {
+	peak     uint64
+	exceeded bool
 }
 
 type runner struct {
@@ -236,7 +261,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	metadataValue, err := collectMetadata(ctx, manifestBytes, toolchain, binaries, workloads)
+	metadataValue, err := collectMetadata(ctx, manifestBytes, toolchain, binaries, workloads, opts)
 	if err != nil {
 		return err
 	}
@@ -262,6 +287,8 @@ func run(ctx context.Context, args []string) error {
 		workloads: workloads,
 		scenarios: scenarios,
 	}
+	_, _ = fmt.Fprintf(os.Stdout, "benchmark limits: timeout=%s, RSS=%d MiB, GOMAXPROCS=%d, nice=%d\n",
+		opts.RunTimeout, opts.MaxRSSMiB, opts.GoMaxProcs, opts.Nice)
 	runErr := r.runAll(m.Concurrency, m.Runs)
 	if runErr != nil {
 		return runErr
@@ -327,6 +354,10 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.Profiles, "profiles", false, "capture separate CPU, heap, and trace profiles")
 	fs.BoolVar(&opts.Prepare, "prepare", true, "prewarm the Go build and module caches")
 	fs.IntVar(&opts.ProfileConcurrency, "profile-concurrency", defaultProfileConcurrency, "concurrency for profile runs")
+	fs.DurationVar(&opts.RunTimeout, "run-timeout", defaultRunTimeout, "hard timeout for each golangci-lint process")
+	fs.Uint64Var(&opts.MaxRSSMiB, "max-rss-mib", defaultMaxRSSMiB, "kill a process tree above this RSS")
+	fs.IntVar(&opts.GoMaxProcs, "go-max-procs", defaultGoMaxProcs, "GOMAXPROCS and Go build parallelism limit")
+	fs.IntVar(&opts.Nice, "nice", defaultNice, "Unix scheduling nicety from 0 to 20")
 	if err := fs.Parse(args); err != nil {
 		return options{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -341,6 +372,21 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.ProfileConcurrency < 1 {
 		return options{}, errors.New("--profile-concurrency must be positive")
+	}
+	if opts.RunTimeout <= 0 {
+		return options{}, errors.New("--run-timeout must be positive")
+	}
+	if opts.MaxRSSMiB == 0 {
+		return options{}, errors.New("--max-rss-mib must be positive")
+	}
+	if opts.MaxRSSMiB > math.MaxUint64/bytesPerMiB {
+		return options{}, errors.New("--max-rss-mib is too large")
+	}
+	if opts.GoMaxProcs < 1 {
+		return options{}, errors.New("--go-max-procs must be positive")
+	}
+	if opts.Nice < 0 || opts.Nice > 20 {
+		return options{}, errors.New("--nice must be between 0 and 20")
 	}
 	if _, err := parseCacheModes(opts.CacheMode); err != nil {
 		return options{}, err
@@ -695,6 +741,7 @@ func collectMetadata(
 	toolchain goToolchain,
 	binaries []binary,
 	workloads []preparedWorkload,
+	opts options,
 ) (metadata, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -732,6 +779,14 @@ func collectMetadata(
 			GOARCH:    runtime.GOARCH,
 		},
 		ManifestHash: bytesSHA256(manifestBytes),
+		Limits: limitsMetadata{
+			RunTimeoutNS:         opts.RunTimeout.Nanoseconds(),
+			MaxTreeRSSBytes:      opts.MaxRSSMiB * bytesPerMiB,
+			GoMaxProcs:           opts.GoMaxProcs,
+			GoMemoryLimit:        fmt.Sprintf("%dMiB", opts.MaxRSSMiB),
+			GoBuildParallelism:   opts.GoMaxProcs,
+			UnixSchedulingNicety: opts.Nice,
+		},
 	}
 	for _, item := range binaries {
 		hash, err := fileSHA256(item.Path)
@@ -892,7 +947,7 @@ func (r *runner) execute(
 	if err != nil {
 		return fmt.Errorf("resolve workload target: %w", err)
 	}
-	args, err := buildRunArgs(workload, scenario, concurrency, extra)
+	args, err := buildRunArgs(workload, scenario, concurrency, r.opts.RunTimeout, extra)
 	if err != nil {
 		return err
 	}
@@ -910,11 +965,13 @@ func (r *runner) execute(
 		return err
 	}
 
+	runCtx, cancel := context.WithTimeout(r.ctx, r.opts.RunTimeout)
+	defer cancel()
 	cmd := r.newBenchmarkCommand(bin, workDir, cacheDir, args, extra, logFile)
 
 	startedAt := time.Now().UTC()
 	started := time.Now()
-	finished, startErr := startCommand(r.ctx, cmd)
+	finished, startErr := startCommand(runCtx, cmd)
 	if startErr != nil {
 		return startErr
 	}
@@ -926,12 +983,24 @@ func (r *runner) execute(
 		return fmt.Errorf("benchmark PID exceeds supported range: %d", cmd.Process.Pid)
 	}
 	stopMemory := make(chan struct{})
-	peakMemory := trackPeakTreeRSS(r.ctx, int32(cmd.Process.Pid), stopMemory)
+	peakMemory := trackPeakTreeRSS(
+		runCtx,
+		int32(cmd.Process.Pid),
+		r.opts.MaxRSSMiB*bytesPerMiB,
+		cancel,
+		stopMemory,
+	)
 	waitErr := cmd.Wait()
 	close(finished)
 	close(stopMemory)
-	peakRSS := <-peakMemory
+	memoryStats := <-peakMemory
 	wall := time.Since(started)
+	terminationReason := ""
+	if memoryStats.exceeded {
+		terminationReason = "rss_limit"
+	} else if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		terminationReason = "timeout"
+	}
 
 	exitCode, err := commandExitCode(waitErr)
 	if err != nil {
@@ -948,17 +1017,18 @@ func (r *runner) execute(
 		systemCPU = cmd.ProcessState.SystemTime()
 	}
 	stats := executionStats{
-		startedAt:    startedAt,
-		wall:         wall,
-		userCPU:      userCPU,
-		systemCPU:    systemCPU,
-		peakRSS:      peakRSS,
-		cacheBefore:  cacheBefore,
-		cacheAfter:   cacheAfter,
-		exitCode:     exitCode,
-		logPath:      logPath,
-		artifactPath: artifact,
-		args:         args,
+		startedAt:         startedAt,
+		wall:              wall,
+		userCPU:           userCPU,
+		systemCPU:         systemCPU,
+		peakRSS:           memoryStats.peak,
+		cacheBefore:       cacheBefore,
+		cacheAfter:        cacheAfter,
+		exitCode:          exitCode,
+		logPath:           logPath,
+		artifactPath:      artifact,
+		terminationReason: terminationReason,
+		args:              args,
 	}
 
 	return r.recordExecution(bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose, &stats)
@@ -976,27 +1046,28 @@ func (r *runner) recordExecution(
 	stats *executionStats,
 ) error {
 	record := result{
-		SchemaVersion:    schemaVersion,
-		Binary:           bin.Label,
-		Workload:         workload.Name,
-		WorkloadRevision: workload.Revision,
-		Target:           target,
-		Scenario:         scenario.Name,
-		CacheMode:        cacheMode,
-		Concurrency:      concurrency,
-		Iteration:        iteration,
-		Purpose:          purpose,
-		StartedAt:        stats.startedAt,
-		WallNS:           stats.wall.Nanoseconds(),
-		UserCPUNS:        stats.userCPU.Nanoseconds(),
-		SystemCPUNS:      stats.systemCPU.Nanoseconds(),
-		PeakTreeRSSBytes: stats.peakRSS,
-		CacheBytesBefore: stats.cacheBefore,
-		CacheBytesAfter:  stats.cacheAfter,
-		ExitCode:         stats.exitCode,
-		LogPath:          relativePath(r.outDir, stats.logPath),
-		ArtifactPath:     relativePath(r.outDir, stats.artifactPath),
-		Command:          append([]string{bin.Path}, stats.args...),
+		SchemaVersion:     schemaVersion,
+		Binary:            bin.Label,
+		Workload:          workload.Name,
+		WorkloadRevision:  workload.Revision,
+		Target:            target,
+		Scenario:          scenario.Name,
+		CacheMode:         cacheMode,
+		Concurrency:       concurrency,
+		Iteration:         iteration,
+		Purpose:           purpose,
+		StartedAt:         stats.startedAt,
+		WallNS:            stats.wall.Nanoseconds(),
+		UserCPUNS:         stats.userCPU.Nanoseconds(),
+		SystemCPUNS:       stats.systemCPU.Nanoseconds(),
+		PeakTreeRSSBytes:  stats.peakRSS,
+		CacheBytesBefore:  stats.cacheBefore,
+		CacheBytesAfter:   stats.cacheAfter,
+		ExitCode:          stats.exitCode,
+		LogPath:           relativePath(r.outDir, stats.logPath),
+		ArtifactPath:      relativePath(r.outDir, stats.artifactPath),
+		TerminationReason: stats.terminationReason,
+		Command:           append([]string{bin.Path}, stats.args...),
 	}
 	if err := appendJSONLine(r.results, record); err != nil {
 		return err
@@ -1005,6 +1076,9 @@ func (r *runner) recordExecution(
 		bin.Label, workload.Name, safeName(target), scenario.Name, concurrency, cacheMode, purpose,
 		stats.wall.Round(time.Millisecond), stats.peakRSS/bytesPerMiB)
 
+	if stats.terminationReason != "" {
+		return fmt.Errorf("benchmark command stopped by %s; see %s", stats.terminationReason, stats.logPath)
+	}
 	if stats.exitCode != 0 {
 		return fmt.Errorf("benchmark command exited with %d; see %s", stats.exitCode, stats.logPath)
 	}
@@ -1016,13 +1090,14 @@ func buildRunArgs(
 	workload *preparedWorkload,
 	scenario scenario,
 	concurrency int,
+	runTimeout time.Duration,
 	extra []string,
 ) ([]string, error) {
 	args := []string{
 		"--color=never",
 		"run",
 		"-v",
-		"--timeout=30m",
+		"--timeout=" + runTimeout.String(),
 		"--issues-exit-code=0",
 		"--fix=false",
 		fmt.Sprintf("--concurrency=%d", concurrency),
@@ -1057,6 +1132,9 @@ func (r *runner) newBenchmarkCommand(
 ) *exec.Cmd {
 	environ := replaceEnv(os.Environ(),
 		"GOLANGCI_LINT_CACHE="+cacheDir,
+		fmt.Sprintf("GOMAXPROCS=%d", r.opts.GoMaxProcs),
+		fmt.Sprintf("GOMEMLIMIT=%dMiB", r.opts.MaxRSSMiB),
+		fmt.Sprintf("GOFLAGS=-p=%d", r.opts.GoMaxProcs),
 		"GOROOT="+r.goRoot,
 		"PATH="+filepath.Join(r.goRoot, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
@@ -1066,9 +1144,16 @@ func (r *runner) newBenchmarkCommand(
 		}
 	}
 
+	path := bin.Path
+	commandArgs := append([]string{bin.Path}, args...)
+	if runtime.GOOS != "windows" && r.opts.Nice > 0 {
+		path = "/usr/bin/nice"
+		commandArgs = append([]string{path, "-n", strconv.Itoa(r.opts.Nice), bin.Path}, args...)
+	}
+
 	return &exec.Cmd{
-		Path:   bin.Path,
-		Args:   append([]string{bin.Path}, args...),
+		Path:   path,
+		Args:   commandArgs,
 		Dir:    workDir,
 		Env:    environ,
 		Stdout: output,
@@ -1088,7 +1173,7 @@ func startCommand(ctx context.Context, cmd *exec.Cmd) (chan struct{}, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
+			killProcessTree(int32(cmd.Process.Pid))
 		case <-finished:
 		}
 	}()
@@ -1163,8 +1248,14 @@ func replaceEnv(environ []string, values ...string) []string {
 	return result
 }
 
-func trackPeakTreeRSS(ctx context.Context, rootPID int32, stop <-chan struct{}) <-chan uint64 {
-	resultCh := make(chan uint64, 1)
+func trackPeakTreeRSS(
+	ctx context.Context,
+	rootPID int32,
+	maxRSS uint64,
+	cancel context.CancelFunc,
+	stop <-chan struct{},
+) <-chan memoryStats {
+	resultCh := make(chan memoryStats, 1)
 	go func() {
 		defer close(resultCh)
 
@@ -1177,12 +1268,18 @@ func trackPeakTreeRSS(ctx context.Context, rootPID int32, stop <-chan struct{}) 
 			if current > peak {
 				peak = current
 			}
+			if current > maxRSS {
+				resultCh <- memoryStats{peak: peak, exceeded: true}
+				cancel()
+
+				return
+			}
 			select {
 			case <-ctx.Done():
-				resultCh <- peak
+				resultCh <- memoryStats{peak: peak}
 				return
 			case <-stop:
-				resultCh <- peak
+				resultCh <- memoryStats{peak: peak}
 				return
 			case <-ticker.C:
 			}
@@ -1190,6 +1287,18 @@ func trackPeakTreeRSS(ctx context.Context, rootPID int32, stop <-chan struct{}) 
 	}()
 
 	return resultCh
+}
+
+func killProcessTree(rootPID int32) {
+	p, err := process.NewProcess(rootPID)
+	if err != nil {
+		return
+	}
+	children, _ := p.Children()
+	for _, child := range children {
+		killProcessTree(child.Pid)
+	}
+	_ = p.Kill()
 }
 
 func processTreeRSS(ctx context.Context, pid int32, seen map[int32]struct{}) uint64 {

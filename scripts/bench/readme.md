@@ -15,6 +15,12 @@ and 8-way concurrency. It pins child processes to the manifest's Go toolchain
 and keeps the Go build and module caches warm. Results, logs, cloned workloads,
 and optional profiles stay under ignored `dist/bench/`.
 
+Every golangci-lint process runs at niceness 10 with `GOMAXPROCS=2`, Go build
+parallelism 2, a 2 GiB Go memory limit, a 2 GiB process-tree RSS kill threshold,
+and a five-minute hard timeout. The limits are recorded in `metadata.json` and
+can be tightened with `--nice`, `--go-max-procs`, `--max-rss-mib`, and
+`--run-timeout`.
+
 Run a quick smoke benchmark:
 
 ```bash
