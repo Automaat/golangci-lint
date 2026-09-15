@@ -2,6 +2,53 @@
 
 The script use [Hyperfine](https://github.com/sharkdp/hyperfine) to benchmark the command line of golangci-lint.
 
+## Reproducible baseline
+
+Build the fork and run the pinned workload matrix:
+
+```bash
+make bench_baseline
+```
+
+The default matrix measures cold and warm golangci-lint caches with 1, 2, 4,
+and 8-way concurrency. It pins child processes to the manifest's Go toolchain
+and keeps the Go build and module caches warm. Results, logs, cloned workloads,
+and optional profiles stay under ignored `dist/bench/`.
+
+Every golangci-lint process runs at niceness 10 with `GOMAXPROCS=2`, Go build
+parallelism 2, a 2 GiB Go memory limit, a 2 GiB process-tree RSS kill threshold,
+and a five-minute hard timeout. The limits are recorded in `metadata.json` and
+can be tightened with `--nice`, `--go-max-procs`, `--max-rss-mib`, and
+`--run-timeout`.
+
+Run a quick smoke benchmark:
+
+```bash
+make bench_baseline BENCH_ARGS='--workload small --scenario goanalysis --concurrency 1 --runs 1'
+```
+
+Capture profiles separately from timing samples:
+
+```bash
+make bench_baseline BENCH_ARGS='--profiles'
+```
+
+Heap profiles use a 64 KiB allocation sample rate to keep profiling overhead
+practical. Profile runs never contribute timing samples.
+
+Compare another binary built from the same source base:
+
+```bash
+make bench_baseline UPSTREAM_BIN=/absolute/path/to/upstream/golangci-lint
+```
+
+Artifacts:
+
+- `metadata.json`: host, toolchain, binary hashes, workload revisions, config hashes.
+- `results.jsonl`: one durable record per completed run.
+- `logs/`: verbose golangci-lint output.
+- `profiles/`: CPU, heap, and runtime trace captures.
+
 ## Benchmark one linter: with a local version
 
 ```bash

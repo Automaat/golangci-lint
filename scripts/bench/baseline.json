@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "go_version": "go1.26.0",
+  "concurrency": [1, 2, 4, 8],
+  "runs": 5,
+  "workloads": [
+    {
+      "name": "small",
+      "url": "https://github.com/Automaat/cache-buster.git",
+      "revision": "1ed2641a75cb424a592fa3eddf76da32180e7ed4",
+      "config": ".golangci.yml",
+      "modules": ["."],
+      "packages": ["./..."],
+      "profile_module": "."
+    },
+    {
+      "name": "large",
+      "url": "https://github.com/kumahq/kuma.git",
+      "revision": "12fbf5f561e00b5f71eb5e72dc82e1a9eb4f9e87",
+      "config": ".golangci.yml",
+      "modules": ["."],
+      "packages": ["./..."],
+      "profile_module": "."
+    },
+    {
+      "name": "multi-module",
+      "url": "https://github.com/Automaat/golangci-lint.git",
+      "revision": "2b3d9864a624c76500478b1bc7b0414cbf032f96",
+      "config": ".golangci.yml",
+      "modules": [".", "scripts/gen_github_action_config"],
+      "packages": ["./..."],
+      "profile_module": "."
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "configured",
+      "use_config": true
+    },
+    {
+      "name": "goanalysis",
+      "args": [
+        "--no-config",
+        "--default=none",
+        "--enable-only=govet,staticcheck,unused"
+      ]
+    }
+  ]
+}
