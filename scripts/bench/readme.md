@@ -21,6 +21,13 @@ and a five-minute hard timeout. The limits are recorded in `metadata.json` and
 can be tightened with `--nice`, `--go-max-procs`, `--max-rss-mib`, and
 `--run-timeout`.
 
+The large Kuma workload targets a pinned 81-file, 29.7k-line generated API
+subset with test analysis disabled. Whole-repository Kuma runs exceed the safe
+local resource budget.
+
+Benchmark processes also use golangci-lint's serial-runner lock. They wait
+instead of overlapping another local golangci-lint process.
+
 Run a quick smoke benchmark:
 
 ```bash

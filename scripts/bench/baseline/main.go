@@ -58,6 +58,7 @@ type workload struct {
 	Modules       []string `json:"modules,omitempty"`
 	Packages      []string `json:"packages,omitempty"`
 	ProfileModule string   `json:"profile_module,omitempty"`
+	Tests         *bool    `json:"tests,omitempty"`
 }
 
 type scenario struct {
@@ -1091,6 +1092,7 @@ func buildRunArgs(
 		"run",
 		"-v",
 		"--timeout=" + runTimeout.String(),
+		"--allow-serial-runners",
 		"--issues-exit-code=0",
 		"--fix=false",
 		fmt.Sprintf("--concurrency=%d", concurrency),
@@ -1100,6 +1102,9 @@ func buildRunArgs(
 			return nil, fmt.Errorf("scenario %q requires config for workload %q", scenario.Name, workload.Name)
 		}
 		args = append(args, "--config="+workload.ConfigPath)
+	}
+	if workload.Tests != nil {
+		args = append(args, fmt.Sprintf("--tests=%t", *workload.Tests))
 	}
 	args = append(args, scenario.Args...)
 	for _, value := range extra {
