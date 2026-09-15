@@ -15,8 +15,8 @@
     },
     {
       "name": "large",
-      "url": "https://github.com/Automaat/kuma.git",
-      "revision": "76db2345d34f47babf9746343eb5d9f0a09411cb",
+      "url": "https://github.com/kumahq/kuma.git",
+      "revision": "12fbf5f561e00b5f71eb5e72dc82e1a9eb4f9e87",
       "config": ".golangci.yml",
       "modules": ["."],
       "packages": ["./..."],
@@ -27,7 +27,7 @@
       "url": "https://github.com/Automaat/golangci-lint.git",
       "revision": "2b3d9864a624c76500478b1bc7b0414cbf032f96",
       "config": ".golangci.yml",
-      "modules": [".", "docs", "scripts/gen_github_action_config"],
+      "modules": [".", "scripts/gen_github_action_config"],
       "packages": ["./..."],
       "profile_module": "."
     }
