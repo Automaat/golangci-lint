@@ -19,7 +19,8 @@
       "revision": "12fbf5f561e00b5f71eb5e72dc82e1a9eb4f9e87",
       "config": ".golangci.yml",
       "modules": ["."],
-      "packages": ["./..."],
+      "tests": false,
+      "packages": ["./api/..."],
       "profile_module": "."
     },
     {

@@ -194,12 +194,21 @@ func TestReplaceEnv(t *testing.T) {
 }
 
 func TestBuildRunArgsUsesSafetyTimeout(t *testing.T) {
-	args, err := buildRunArgs(&preparedWorkload{}, scenario{}, 2, 3*time.Minute, nil)
+	tests := false
+	args, err := buildRunArgs(
+		&preparedWorkload{workload: workload{Tests: &tests}}, scenario{}, 2, 3*time.Minute, nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(args, "--timeout=3m0s") {
 		t.Fatalf("expected timeout argument, got %v", args)
+	}
+	if !slices.Contains(args, "--tests=false") {
+		t.Fatalf("expected tests argument, got %v", args)
+	}
+	if !slices.Contains(args, "--allow-serial-runners") {
+		t.Fatalf("expected serial runner lock argument, got %v", args)
 	}
 }
 
