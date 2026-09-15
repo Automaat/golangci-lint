@@ -82,6 +82,9 @@ bench_version: hyperfine
 .PHONY: bench_version
 
 BENCH_FORK_BIN ?= $(CURDIR)/dist/bench/bin/fork
+BENCH_PAIR_DIR ?= $(CURDIR)/dist/bench/bin
+BENCH_CANDIDATE_REF ?= HEAD
+BENCH_UPSTREAM_REF ?= upstream/main
 
 bench_baseline:
 	mkdir -p $(dir $(BENCH_FORK_BIN))
@@ -92,6 +95,32 @@ bench_baseline:
 		$(if $(UPSTREAM_BIN),--upstream-bin $(UPSTREAM_BIN)) \
 		$(BENCH_ARGS)
 .PHONY: bench_baseline
+
+bench_pair:
+	GOMAXPROCS=2 GOFLAGS=-p=2 GOMEMLIMIT=1024MiB go run ./scripts/bench/build_pair \
+		--candidate-ref $(BENCH_CANDIDATE_REF) \
+		--upstream-ref $(BENCH_UPSTREAM_REF) \
+		--out-dir $(BENCH_PAIR_DIR) \
+		--build-timeout 5m \
+		--max-memory-mib 1024 \
+		--go-max-procs 2 \
+		--nice 10
+.PHONY: bench_pair
+
+bench_compat:
+	@:$(call check_defined, BENCH_ARGS, 'explicit workload and concurrency filters required')
+	$(MAKE) bench_pair
+	GOMAXPROCS=2 GOFLAGS=-p=2 GOMEMLIMIT=1024MiB go run ./scripts/bench/baseline \
+		--manifest scripts/bench/baseline.json \
+		--fork-bin $(BENCH_PAIR_DIR)/fork$(suffix $(BINARY)) \
+		--upstream-bin $(BENCH_PAIR_DIR)/upstream$(suffix $(BINARY)) \
+		--compatibility \
+		--run-timeout 2m \
+		--max-rss-mib 1024 \
+		--go-max-procs 2 \
+		--nice 10 \
+		$(BENCH_ARGS)
+.PHONY: bench_compat
 
 bench_compare:
 	go run ./scripts/bench/compare $(COMPARE_ARGS)
