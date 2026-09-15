@@ -45,6 +45,38 @@
         "--default=none",
         "--enable-only=govet,staticcheck,unused"
       ]
+    },
+    {
+      "name": "govet",
+      "args": [
+        "--no-config",
+        "--default=none",
+        "--enable-only=govet"
+      ]
+    },
+    {
+      "name": "staticcheck",
+      "args": [
+        "--no-config",
+        "--default=none",
+        "--enable-only=staticcheck"
+      ]
+    },
+    {
+      "name": "unused",
+      "args": [
+        "--no-config",
+        "--default=none",
+        "--enable-only=unused"
+      ]
+    },
+    {
+      "name": "staticcheck-unused",
+      "args": [
+        "--no-config",
+        "--default=none",
+        "--enable-only=staticcheck,unused"
+      ]
     }
   ]
 }

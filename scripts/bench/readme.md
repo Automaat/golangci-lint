@@ -34,6 +34,14 @@ Run a quick smoke benchmark:
 make bench_baseline BENCH_ARGS='--workload small --scenario goanalysis --concurrency 1 --runs 1'
 ```
 
+The manifest includes focused `govet`, `staticcheck`, `unused`, and
+`staticcheck-unused` scenarios. Compare them with the combined `goanalysis`
+scenario to isolate fact-cache and shared-IR costs:
+
+```bash
+make bench_baseline BENCH_ARGS='--workload large --scenario staticcheck-unused --concurrency 4'
+```
+
 Capture profiles separately from timing samples:
 
 ```bash
