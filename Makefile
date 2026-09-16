@@ -50,6 +50,27 @@ test_integration_fix: build
 	GL_TEST_RUN=1 go test -v ./test -count 1 -run TestFix/$T
 .PHONY: test_integration_fix
 
+# Rust supervisor
+
+rust_fmt:
+	cd rust && cargo fmt --all -- --check
+.PHONY: rust_fmt
+
+rust_lint:
+	cd rust && cargo clippy --workspace --all-targets --locked -- -D warnings
+.PHONY: rust_lint
+
+rust_test:
+	cd rust && cargo test --workspace --all-targets --locked
+.PHONY: rust_test
+
+rust_build:
+	cd rust && cargo build --release --locked --bin golangci-supervisor
+.PHONY: rust_build
+
+rust_check: rust_fmt rust_lint rust_test rust_build
+.PHONY: rust_check
+
 # Maintenance
 
 fast_generate: assets/github-action-config.json
