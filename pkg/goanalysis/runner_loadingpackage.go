@@ -318,8 +318,26 @@ func (lp *loadingPackage) loadWithFacts(loadMode LoadMode) error {
 func (lp *loadingPackage) loadImportedPackageWithFacts(loadMode LoadMode) error {
 	pkg := lp.pkg
 
-	// Load package from export data
-	if loadMode >= LoadModeTypesInfo {
+	needLoadFromSource := false
+	for _, act := range lp.actions {
+		if act.readCachedFacts() {
+			continue
+		}
+
+		factsCacheDebugf("Loading of facts for %s failed, analyze it from source later", act)
+		act.needAnalyzeSource = true // can't be set in parallel
+		needLoadFromSource = true
+		act.markDepsForAnalyzingSource()
+	}
+
+	if needLoadFromSource {
+		if loadMode >= LoadModeTypesInfo {
+			pkg.Types = types.NewPackage(pkg.PkgPath, pkg.Name)
+		}
+		if err := lp.loadFromSource(loadMode); err != nil {
+			return err
+		}
+	} else if loadMode >= LoadModeTypesInfo {
 		if err := lp.loadFromExportData(); err != nil {
 			// We asked Go to give us up-to-date export data, yet
 			// we can't load it. There must be something wrong.
@@ -347,29 +365,12 @@ func (lp *loadingPackage) loadImportedPackageWithFacts(loadMode LoadMode) error 
 		}
 	}
 
-	needLoadFromSource := false
 	for _, act := range lp.actions {
-		if act.loadCachedFacts() {
+		if act.needAnalyzeSource {
+			act.cachedFacts = nil
 			continue
 		}
-
-		// Cached facts loading failed: analyze later the action from source.
-		factsCacheDebugf("Loading of facts for %s failed, analyze it from source later", act)
-		act.needAnalyzeSource = true // can't be set in parallel
-		needLoadFromSource = true
-
-		act.markDepsForAnalyzingSource()
-	}
-
-	if needLoadFromSource {
-		// Cached facts loading failed: analyze later the action from source. To perform
-		// the analysis we need to load the package from source code.
-
-		// Otherwise, it panics because uses already existing (from exported data) types.
-		if loadMode >= LoadModeTypesInfo {
-			pkg.Types = types.NewPackage(pkg.PkgPath, pkg.Name)
-		}
-		return lp.loadFromSource(loadMode)
+		act.applyCachedFacts()
 	}
 
 	return nil

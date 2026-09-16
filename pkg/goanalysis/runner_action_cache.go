@@ -17,6 +17,16 @@ type Fact struct {
 }
 
 func (act *action) loadCachedFacts() bool {
+	if !act.readCachedFacts() {
+		return false
+	}
+
+	act.applyCachedFacts()
+
+	return true
+}
+
+func (act *action) readCachedFacts() bool {
 	if act.loadCachedFactsDone { // can't be set in parallel
 		return act.loadCachedFactsOk
 	}
@@ -30,18 +40,11 @@ func (act *action) loadCachedFacts() bool {
 			return true // no need to load facts
 		}
 
-		if !act.loadPersistedFacts() {
+		facts, ok := act.readPersistedFacts()
+		if !ok {
 			return false
 		}
-
-		// The cache only stores the facts a package produces about its own objects.
-		// The facts a package re-exports from its dependencies (see exportedFrom) are not persisted,
-		// to avoid duplicating them in every cache entry (which grows quadratically with the import graph).
-		// Instead, we rebuild them in memory here by inheriting from the dependencies,
-		// exactly like analyze() does for packages analyzed from source.
-		// This is safe because every dependency is fully analyzed (from cache or source)  before this package is loaded,
-		// so their facts are already available.
-		act.inheritFactsFromDeps()
+		act.cachedFacts = facts
 
 		return true
 	}()
@@ -50,6 +53,20 @@ func (act *action) loadCachedFacts() bool {
 	act.loadCachedFactsOk = res
 
 	return res
+}
+
+func (act *action) applyCachedFacts() {
+	if act.cachedFactsApplied || !act.loadCachedFactsOk || act.isInitialPkg || len(act.Analyzer.FactTypes) == 0 {
+		return
+	}
+
+	act.applyPersistedFacts(act.cachedFacts)
+	act.cachedFacts = nil
+	act.cachedFactsApplied = true
+
+	// The cache only stores facts a package produces about its own objects.
+	// Rebuild re-exported facts from dependencies after package types are loaded.
+	act.inheritFactsFromDeps()
 }
 
 // inheritFactsFromDeps rebuilds, in memory,
@@ -118,7 +135,7 @@ func (act *action) persistFactsToCache() error {
 	return act.runner.pkgCache.Put(act.Package, cache.HashModeNeedAllDeps, factCacheKey(analyzer), facts)
 }
 
-func (act *action) loadPersistedFacts() bool {
+func (act *action) readPersistedFacts() ([]Fact, bool) {
 	var facts []Fact
 
 	err := act.runner.pkgCache.Get(act.Package, cache.HashModeNeedAllDeps, factCacheKey(act.Analyzer), &facts)
@@ -129,11 +146,14 @@ func (act *action) loadPersistedFacts() bool {
 
 		factsCacheDebugf("No cached facts for package %q and analyzer %s", act.Package.Name, act.Analyzer.Name)
 
-		return false
+		return nil, false
 	}
 
 	factsCacheDebugf("Loaded %d cached facts for package %q and analyzer %s", len(facts), act.Package.Name, act.Analyzer.Name)
+	return facts, true
+}
 
+func (act *action) applyPersistedFacts(facts []Fact) {
 	for _, f := range facts {
 		if f.Path == "" { // this is a package fact
 			key := packageFactKey{pkg: act.Package.Types, typ: act.factType(f.Fact)}
@@ -158,8 +178,6 @@ func (act *action) loadPersistedFacts() bool {
 		factKey := objectFactKey{obj, act.factType(f.Fact)}
 		act.objectFacts[factKey] = f.Fact
 	}
-
-	return true
 }
 
 func factCacheKey(a *analysis.Analyzer) string {
