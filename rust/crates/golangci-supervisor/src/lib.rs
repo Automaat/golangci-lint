@@ -22,6 +22,8 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 
+mod worker_transport;
+
 pub const EXIT_SUPERVISOR: i32 = 126;
 pub const EXIT_STARTUP: i32 = 127;
 pub const EXIT_CANCELLED: i32 = 130;
@@ -33,12 +35,21 @@ const TIMEOUT_ENV: &str = "GOLANGCI_SUPERVISOR_TIMEOUT_MS";
 const MAX_RSS_ENV: &str = "GOLANGCI_SUPERVISOR_MAX_RSS_BYTES";
 const REPORT_ENV: &str = "GOLANGCI_SUPERVISOR_REPORT";
 const POLL_ENV: &str = "GOLANGCI_SUPERVISOR_POLL_MS";
+const TRANSPORT_ENV: &str = "GOLANGCI_SUPERVISOR_TRANSPORT";
+const WORKER_ENDPOINT_ENV: &str = "GOLANGCI_WORKER_ENDPOINT";
+const WORKER_TOKEN_ENV: &str = "GOLANGCI_WORKER_TOKEN";
 const DEFAULT_POLL_MS: u64 = 10;
 const MIN_MEMORY_POLL_MS: u64 = 50;
 
 const CAUSE_NONE: u8 = 0;
 const CAUSE_CANCELLED: u8 = 1;
 const CAUSE_RSS: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Transport {
+    Direct,
+    Worker,
+}
 
 #[derive(Debug)]
 pub struct SupervisorError {
@@ -72,6 +83,7 @@ impl std::error::Error for SupervisorError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     target: OsString,
+    transport: Transport,
     timeout: Option<Duration>,
     max_rss_bytes: Option<u64>,
     report: Option<PathBuf>,
@@ -90,6 +102,15 @@ impl Config {
         let target = lookup(TARGET_ENV)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| config_error(format!("{TARGET_ENV} must name the Go executable")))?;
+        let transport = match lookup(TRANSPORT_ENV) {
+            None => Transport::Direct,
+            Some(value) if value == "worker" => Transport::Worker,
+            Some(_) => {
+                return Err(config_error(format!(
+                    "{TRANSPORT_ENV} must be unset or equal to worker"
+                )));
+            }
+        };
         let timeout = parse_optional_duration(TIMEOUT_ENV, lookup(TIMEOUT_ENV))?;
         let max_rss_bytes = parse_optional_u64(MAX_RSS_ENV, lookup(MAX_RSS_ENV))?;
         let report = lookup(REPORT_ENV)
@@ -107,6 +128,7 @@ impl Config {
 
         Ok(Self {
             target,
+            transport,
             timeout,
             max_rss_bytes,
             report,
@@ -184,6 +206,18 @@ pub fn run(
     args: Vec<OsString>,
     cancellation: Cancellation,
 ) -> Result<i32, SupervisorError> {
+    if config.transport == Transport::Worker {
+        return worker_transport::run(config, args, cancellation);
+    }
+
+    run_direct(config, args, cancellation)
+}
+
+fn run_direct(
+    config: Config,
+    args: Vec<OsString>,
+    cancellation: Cancellation,
+) -> Result<i32, SupervisorError> {
     let started = Instant::now();
     if cancellation.cause() != CAUSE_NONE {
         return finish_cancelled(&config, started, cancellation, MemoryResult::empty());
@@ -191,7 +225,16 @@ pub fn run(
 
     let mut command = StdCommand::new(&config.target);
     command.args(args);
-    for name in [TARGET_ENV, TIMEOUT_ENV, MAX_RSS_ENV, REPORT_ENV, POLL_ENV] {
+    for name in [
+        TARGET_ENV,
+        TIMEOUT_ENV,
+        MAX_RSS_ENV,
+        REPORT_ENV,
+        POLL_ENV,
+        TRANSPORT_ENV,
+        WORKER_ENDPOINT_ENV,
+        WORKER_TOKEN_ENV,
+    ] {
         command.env_remove(name);
     }
     let child = match spawn_group(&mut command) {
@@ -252,8 +295,7 @@ pub fn run(
                 || err.to_string(),
                 |cleanup| format!("{err}; process-tree cleanup failed: {cleanup}"),
             );
-            let report =
-                Report::lifecycle_error(started.elapsed(), memory.peak_rss, message.clone());
+            let report = Report::lifecycle_error(started.elapsed(), memory, message.clone());
             write_optional_report(config.report.as_deref(), &report)?;
             Err(SupervisorError::new(EXIT_SUPERVISOR, message))
         }
@@ -602,10 +644,10 @@ impl Report {
         }
     }
 
-    fn lifecycle_error(elapsed: Duration, peak_rss: u64, error: String) -> Self {
+    fn lifecycle_error(elapsed: Duration, memory: MemoryResult, error: String) -> Self {
         let mut report = Self::failed("lifecycle_error", elapsed, error);
-        report.peak_tree_rss_bytes = peak_rss;
-        report.surviving_descendants = None;
+        report.peak_tree_rss_bytes = memory.peak_rss;
+        report.surviving_descendants = memory.survivors;
         report
     }
 }
@@ -678,7 +720,7 @@ mod tests {
 
     use super::{
         Config, MAX_RSS_ENV, MemoryResult, POLL_ENV, REPORT_ENV, Report, TARGET_ENV, TIMEOUT_ENV,
-        millis,
+        TRANSPORT_ENV, Transport, millis,
     };
 
     #[test]
@@ -689,10 +731,12 @@ mod tests {
             (MAX_RSS_ENV, OsString::from("4096")),
             (REPORT_ENV, OsString::from("outcome.json")),
             (POLL_ENV, OsString::from("20")),
+            (TRANSPORT_ENV, OsString::from("worker")),
         ]);
         let config = Config::from_lookup(|name| values.get(name).cloned()).unwrap();
 
         assert_eq!(config.target, OsString::from("go-lint"));
+        assert_eq!(config.transport, Transport::Worker);
         assert_eq!(config.timeout, Some(Duration::from_millis(250)));
         assert_eq!(config.max_rss_bytes, Some(4096));
         assert_eq!(config.report.unwrap().to_string_lossy(), "outcome.json");
@@ -718,6 +762,12 @@ mod tests {
         let values = HashMap::from([
             (TARGET_ENV, OsString::from("go-lint")),
             (POLL_ENV, OsString::from("0")),
+        ]);
+        assert!(Config::from_lookup(|name| values.get(name).cloned()).is_err());
+
+        let values = HashMap::from([
+            (TARGET_ENV, OsString::from("go-lint")),
+            (TRANSPORT_ENV, OsString::from("stdio")),
         ]);
         assert!(Config::from_lookup(|name| values.get(name).cloned()).is_err());
     }

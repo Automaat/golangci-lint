@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/golangci/golangci-lint/v2/internal/processexit"
 	"github.com/golangci/golangci-lint/v2/pkg/exitcodes"
 )
 
@@ -60,7 +61,7 @@ func (sl StderrLog) prefix() string {
 
 func (sl StderrLog) Fatalf(format string, args ...any) {
 	sl.logger.Errorf("%s%s", sl.prefix(), fmt.Sprintf(format, args...))
-	os.Exit(exitcodes.Failure)
+	processexit.Exit(exitcodes.Failure)
 }
 
 func (sl StderrLog) Panicf(format string, args ...any) {

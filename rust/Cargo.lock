@@ -76,6 +76,7 @@ version = "0.1.0"
 dependencies = [
  "command-group",
  "ctrlc",
+ "golangci-protocol",
  "serde",
  "serde_json",
  "sysinfo",

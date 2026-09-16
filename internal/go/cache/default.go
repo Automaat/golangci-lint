@@ -6,7 +6,6 @@ package cache
 
 import (
 	"fmt"
-	base "log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,16 +30,16 @@ const cacheREADME = `This directory holds cached build artifacts from golangci-l
 func initDefaultCache() Cache {
 	dir, _, err := DefaultDir()
 	if err != nil {
-		base.Fatalf("build cache is required, but could not be located: %v", err)
+		fatalf("build cache is required, but could not be located: %v", err)
 	}
 	if dir == "off" {
 		if defaultDirErr != nil {
-			base.Fatalf("build cache is required, but could not be located: %v", defaultDirErr)
+			fatalf("build cache is required, but could not be located: %v", defaultDirErr)
 		}
-		base.Fatalf("build cache is disabled by %s=off, but required as of Go 1.12", envGolangciLintCache)
+		fatalf("build cache is disabled by %s=off, but required as of Go 1.12", envGolangciLintCache)
 	}
 	if err := os.MkdirAll(dir, 0o777); err != nil {
-		base.Fatalf("failed to initialize build cache at %s: %s\n", dir, err)
+		fatalf("failed to initialize build cache at %s: %s\n", dir, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "README")); err != nil {
 		// Best effort.
@@ -49,7 +48,7 @@ func initDefaultCache() Cache {
 
 	diskCache, err := Open(dir)
 	if err != nil {
-		base.Fatalf("failed to initialize build cache at %s: %s\n", dir, err)
+		fatalf("failed to initialize build cache at %s: %s\n", dir, err)
 	}
 
 	if v := os.Getenv(envGolangciLintCacheProg); v != "" {

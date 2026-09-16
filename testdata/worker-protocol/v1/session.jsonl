@@ -6,3 +6,4 @@
 {"protocol_version":1,"kind":"cancel","request_id":"run-1","payload":{"reason":"controller deadline"}}
 {"protocol_version":1,"kind":"complete","request_id":"run-1","sequence":4,"payload":{"exit_code":130,"issues":1,"elapsed_ns":15000000}}
 {"protocol_version":1,"kind":"shutdown","payload":{}}
+{"protocol_version":1,"kind":"shutdown_ack","sequence":5,"payload":{}}

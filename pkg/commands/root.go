@@ -26,12 +26,17 @@ type rootOptions struct {
 
 type rootCommand struct {
 	cmd  *cobra.Command
+	run  *runCommand
 	opts rootOptions
 
 	log logutils.Log
 }
 
 func newRootCommand(info BuildInfo) *rootCommand {
+	return newRootCommandWithRunOptions(info, nil)
+}
+
+func newRootCommandWithRunOptions(info BuildInfo, options *runCommandOptions) *rootCommand {
 	c := &rootCommand{}
 
 	rootCmd := &cobra.Command{
@@ -55,12 +60,16 @@ func newRootCommand(info BuildInfo) *rootCommand {
 	setupRootPersistentFlags(rootCmd.PersistentFlags(), &c.opts)
 
 	log := logutils.NewStderrLog(logutils.DebugKeyEmpty)
+	run := newRunCommand(log, info)
+	if options != nil {
+		run = newRunCommandWithOptions(log, info, *options)
+	}
 
 	// Each command uses a dedicated configuration structure to avoid side effects of bindings.
 	rootCmd.AddCommand(
 		newLintersCommand(log).cmd,
 		newFormattersCommand(log).cmd,
-		newRunCommand(log, info).cmd,
+		run.cmd,
 		newFmtCommand(log, info).cmd,
 		newMigrateCommand(log, info).cmd,
 		newCacheCommand().cmd,
@@ -73,6 +82,7 @@ func newRootCommand(info BuildInfo) *rootCommand {
 
 	c.log = log
 	c.cmd = rootCmd
+	c.run = run
 
 	return c
 }
@@ -112,13 +122,17 @@ func setupLogger(logger logutils.Log) error {
 	case "auto":
 		// nothing
 	default:
-		logger.Fatalf("invalid value %q for --color; must be 'always', 'auto', or 'never'", opts.Color)
+		logger.Fatalf("%s", invalidColorError(opts.Color))
 	}
 
 	// For log level colors (mainly for verbose output)
 	logutils.DisableColors(color.NoColor)
 
 	return nil
+}
+
+func invalidColorError(value string) error {
+	return fmt.Errorf("invalid value %q for --color; must be 'always', 'auto', or 'never'", value)
 }
 
 func forceRootParsePersistentFlags() (*rootOptions, error) {

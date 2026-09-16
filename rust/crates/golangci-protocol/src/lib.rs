@@ -20,6 +20,7 @@ pub enum Kind {
     Run,
     Cancel,
     Shutdown,
+    ShutdownAck,
     Lifecycle,
     Diagnostic,
     Complete,
@@ -32,7 +33,12 @@ impl Kind {
     fn is_worker_event(self) -> bool {
         matches!(
             self,
-            Self::Ready | Self::Lifecycle | Self::Diagnostic | Self::Complete | Self::Error
+            Self::Ready
+                | Self::ShutdownAck
+                | Self::Lifecycle
+                | Self::Diagnostic
+                | Self::Complete
+                | Self::Error
         )
     }
 
@@ -708,6 +714,10 @@ fn validate_payload(envelope: &Envelope) -> Result<(), ProtocolError> {
             ensure(!payload.reason.is_empty(), "cancel requires reason")
         }
         Kind::Shutdown => {
+            let _: ShutdownPayload = decode_payload(envelope)?;
+            Ok(())
+        }
+        Kind::ShutdownAck => {
             let _: ShutdownPayload = decode_payload(envelope)?;
             Ok(())
         }

@@ -17,10 +17,24 @@ GOLANGCI_SUPERVISOR_TARGET=/path/to/golangci-lint \
 ```
 
 `golangci-protocol` is the second Rust boundary. It defines the versioned
-JSON-lines contract for a future Go analysis worker; the matching Go codec and
-shared golden vectors keep both implementations byte-compatible. It is not yet
-connected to either executable, so it cannot change CLI behavior. The wire
+JSON-lines contract for the Go analysis worker; the matching Go codec and
+shared golden vectors keep both implementations byte-compatible. The wire
 contract is documented in `../testdata/worker-protocol/README.md`.
+
+The first worker transport is also opt-in. It uses an authenticated ephemeral
+loopback connection for control messages while leaving stdout and stderr
+inherited, then executes the existing Go `run` command in the worker process:
+
+```sh
+GOLANGCI_SUPERVISOR_TARGET=/path/to/golangci-lint \
+GOLANGCI_SUPERVISOR_TRANSPORT=worker \
+  target/release/golangci-supervisor run ./...
+```
+
+This slice transports lifecycle, completion, and shutdown-acknowledgement
+records. Diagnostics and fixes remain on the unchanged Go CLI streams; the
+Rust process still owns timeout, RSS, cancellation, and complete process-tree
+cleanup.
 
 ## Configuration
 
@@ -34,6 +48,7 @@ child environment:
 | `GOLANGCI_SUPERVISOR_MAX_RSS_BYTES` | Optional process-tree RSS limit; `0` disables it. |
 | `GOLANGCI_SUPERVISOR_REPORT` | Optional path for an atomic JSON outcome report. |
 | `GOLANGCI_SUPERVISOR_POLL_MS` | Lifecycle polling interval; defaults to `10`. |
+| `GOLANGCI_SUPERVISOR_TRANSPORT` | Unset for direct exec; `worker` enables the experimental protocol transport. |
 
 The versioned report records the termination class, child exit or signal,
 elapsed time, peak tree RSS, cancellation latency, cleanup result, and wrapper

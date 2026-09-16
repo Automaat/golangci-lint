@@ -23,6 +23,12 @@ var (
 
 func main() {
 	info := createBuildInfo()
+	if handled, exitCode, err := commands.TryExecuteWorker(info); handled {
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "The command is terminated due to an error: %v\n", err)
+		}
+		os.Exit(exitCode)
+	}
 
 	if err := commands.Execute(info); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "The command is terminated due to an error: %v\n", err)
