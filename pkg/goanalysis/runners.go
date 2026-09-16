@@ -61,7 +61,7 @@ func runAnalyzers(cfg runAnalyzersConfig, lintCtx *linter.Context) (retIssues []
 	}
 
 	metrics := newAnalysisLifecycle(cfg, lintCtx.Lifecycle, len(pkgs), len(pkgsToAnalyze))
-	var statsReady func(analysisStats)
+	var statsReady func(*analysisStats)
 	if metrics != nil {
 		statsReady = metrics.recordStats
 		defer func() { metrics.finishRecovered(retIssues, retErr, recover()) }()
@@ -136,7 +136,7 @@ func newAnalysisLifecycle(cfg runAnalyzersConfig, recorder *lifecycle.Recorder,
 	return metrics
 }
 
-func (m *analysisLifecycle) recordStats(stats analysisStats) {
+func (m *analysisLifecycle) recordStats(stats *analysisStats) {
 	if m == nil {
 		return
 	}
@@ -145,6 +145,19 @@ func (m *analysisLifecycle) recordStats(stats analysisStats) {
 	m.report.TotalPkgs = stats.totalPackages
 	m.report.Actions = stats.actions
 	m.report.Parallelism = stats.parallelism
+	m.report.Scheduler = &lifecycle.SchedulerRun{
+		RootActions:              stats.scheduler.rootActions,
+		HorizontalEdges:          stats.scheduler.horizontalEdges,
+		VerticalEdges:            stats.scheduler.verticalEdges,
+		SourceActions:            stats.scheduler.sourceActions,
+		SourceLoads:              stats.scheduler.sourceLoads,
+		ExportLoads:              stats.scheduler.exportLoads,
+		PeakPackageWorkers:       stats.scheduler.peakPackageWorkers,
+		PeakActionGoroutines:     stats.scheduler.peakActionGoroutines,
+		PeakExecutingActions:     stats.scheduler.peakExecutingActions,
+		PackageDependencyWaitNS:  stats.scheduler.packageDependencyWait.Nanoseconds(),
+		AnalyzerDependencyWaitNS: stats.scheduler.analyzerDependencyWait.Nanoseconds(),
+	}
 	for _, analyzer := range stats.analyzers {
 		linterName := m.cfg.getLinterNameForAnalyzer(analyzer.analyzer)
 		m.report.Analyzers = append(m.report.Analyzers, lifecycle.AnalyzerRun{

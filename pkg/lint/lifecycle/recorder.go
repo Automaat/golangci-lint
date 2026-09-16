@@ -50,6 +50,21 @@ type AnalyzerRun struct {
 	Errors          int    `json:"errors"`
 }
 
+// SchedulerRun describes the Go analysis scheduler workload.
+type SchedulerRun struct {
+	RootActions              int   `json:"root_actions"`
+	HorizontalEdges          int   `json:"horizontal_edges"`
+	VerticalEdges            int   `json:"vertical_edges"`
+	SourceActions            int   `json:"source_actions"`
+	SourceLoads              int   `json:"source_loads"`
+	ExportLoads              int   `json:"export_loads"`
+	PeakPackageWorkers       int   `json:"peak_package_workers"`
+	PeakActionGoroutines     int   `json:"peak_action_goroutines"`
+	PeakExecutingActions     int   `json:"peak_executing_actions"`
+	PackageDependencyWaitNS  int64 `json:"package_dependency_wait_ns"`
+	AnalyzerDependencyWaitNS int64 `json:"analyzer_dependency_wait_ns"`
+}
+
 // AnalysisRun describes one Go analysis graph execution.
 type AnalysisRun struct {
 	Name              string                `json:"name"`
@@ -61,6 +76,7 @@ type AnalysisRun struct {
 	TotalPkgs         int                   `json:"total_packages"`
 	Actions           int                   `json:"actions"`
 	Parallelism       int                   `json:"parallelism"`
+	Scheduler         *SchedulerRun         `json:"scheduler,omitempty"`
 	ConfiguredLinters []ConfiguredLinterRun `json:"configured_linters"`
 	Analyzers         []AnalyzerRun         `json:"analyzers"`
 	Error             string                `json:"error,omitempty"`
@@ -160,6 +176,10 @@ func (r *Recorder) RecordAnalysis(run *AnalysisRun) {
 	value := *run
 	value.ConfiguredLinters = cloneSlice(run.ConfiguredLinters)
 	value.Analyzers = cloneSlice(run.Analyzers)
+	if run.Scheduler != nil {
+		scheduler := *run.Scheduler
+		value.Scheduler = &scheduler
+	}
 	r.report.Analysis = append(r.report.Analysis, value)
 }
 
@@ -211,6 +231,10 @@ func (r *Recorder) Snapshot() Report {
 	for i := range report.Analysis {
 		report.Analysis[i].ConfiguredLinters = cloneSlice(report.Analysis[i].ConfiguredLinters)
 		report.Analysis[i].Analyzers = cloneSlice(report.Analysis[i].Analyzers)
+		if report.Analysis[i].Scheduler != nil {
+			value := *report.Analysis[i].Scheduler
+			report.Analysis[i].Scheduler = &value
+		}
 	}
 	if r.report.PackageLoad != nil {
 		value := *r.report.PackageLoad
