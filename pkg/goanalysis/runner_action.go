@@ -1,10 +1,8 @@
 package goanalysis
 
 import (
-	"context"
 	"fmt"
 	"runtime/debug"
-	"time"
 
 	"github.com/golangci/golangci-lint/v2/internal/errorutil"
 )
@@ -28,32 +26,6 @@ func (actAlloc *actionAllocator) alloc() *action {
 	act := &actAlloc.allocatedActions[actAlloc.nextFreeIndex]
 	actAlloc.nextFreeIndex++
 	return act
-}
-
-func (act *action) waitUntilDependingAnalyzersWorked(ctx context.Context) time.Duration {
-	measure := act.runner != nil && act.runner.scheduler != nil
-	var started time.Time
-	for _, dep := range act.Deps {
-		if dep.Package == act.Package {
-			if measure && started.IsZero() {
-				started = time.Now()
-			}
-			select {
-			case <-ctx.Done():
-				if !measure {
-					return 0
-				}
-				return time.Since(started)
-			case <-dep.analysisDoneCh:
-			}
-		}
-	}
-
-	if !measure || started.IsZero() {
-		return 0
-	}
-
-	return time.Since(started)
 }
 
 func (act *action) analyzeSafe() {

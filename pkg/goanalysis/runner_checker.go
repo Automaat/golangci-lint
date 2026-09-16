@@ -44,7 +44,6 @@ type action struct {
 
 	// NOTE(ldez) custom fields.
 	runner              *runner
-	analysisDoneCh      chan struct{}
 	loadCachedFactsDone bool
 	loadCachedFactsOk   bool
 	isInitialPkg        bool
@@ -70,8 +69,6 @@ func (act *action) String() string {
 
 // NOTE(ldez) altered version of `func (act *action) execOnce()`.
 func (act *action) analyze() {
-	defer close(act.analysisDoneCh) // unblock actions depending on this action
-
 	if !act.needAnalyzeSource {
 		return
 	}

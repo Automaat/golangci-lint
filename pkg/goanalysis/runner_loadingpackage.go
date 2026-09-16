@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
 
@@ -43,14 +42,16 @@ type loadingPackage struct {
 	scheduler   *schedulerMetrics
 }
 
-func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.CancelFunc, loadMode LoadMode, loadSem chan struct{}) {
+func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.CancelFunc, loadMode LoadMode,
+	loadSem chan struct{}, actionWorkers *actionWorkerPool,
+) {
 	lp.analyzeOnce.Do(func() {
 		// Load the direct dependencies, in parallel.
 		var wg sync.WaitGroup
 
 		for _, imp := range lp.imports {
 			wg.Go(func() {
-				imp.analyzeRecursive(ctx, cancel, loadMode, loadSem)
+				imp.analyzeRecursive(ctx, cancel, loadMode, loadSem, actionWorkers)
 			})
 		}
 
@@ -62,11 +63,13 @@ func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.C
 			lp.scheduler.addPackageDependencyWait(time.Since(waitStarted))
 		}
 
-		lp.analyze(ctx, cancel, loadMode, loadSem)
+		lp.analyze(ctx, cancel, loadMode, loadSem, actionWorkers)
 	})
 }
 
-func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc, loadMode LoadMode, loadSem chan struct{}) {
+func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc, loadMode LoadMode,
+	loadSem chan struct{}, actionWorkers *actionWorkerPool,
+) {
 	select {
 	case <-ctx.Done():
 		return
@@ -90,8 +93,6 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 		// Don't need to write error to errCh, it will be extracted and reported on another layer.
 		// Unblock depending on actions and propagate error.
 		for _, act := range lp.actions {
-			close(act.analysisDoneCh)
-
 			act.Err = werr
 		}
 
@@ -102,30 +103,10 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 		return
 	}
 
-	actsWg, ctxGroup := errgroup.WithContext(ctx)
-
-	for _, act := range lp.actions {
-		lp.scheduler.actionGoroutineStarted()
-		actsWg.Go(func() error {
-			defer lp.scheduler.actionGoroutineFinished()
-
-			lp.scheduler.addAnalyzerDependencyWait(act.waitUntilDependingAnalyzersWorked(ctxGroup))
-
-			select {
-			case <-ctxGroup.Done():
-				return nil
-			default:
-			}
-
-			lp.scheduler.actionExecutionStarted()
-			defer lp.scheduler.actionExecutionFinished()
-			act.analyzeSafe()
-
-			return act.Err
-		})
-	}
-
-	err := actsWg.Wait()
+	err := runActionGraph(ctx, lp.actions, actionWorkers, lp.scheduler, func(act *action) error {
+		act.analyzeSafe()
+		return act.Err
+	})
 	if err != nil {
 		cancel()
 	}
