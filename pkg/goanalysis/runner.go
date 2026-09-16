@@ -25,6 +25,8 @@ import (
 	"github.com/golangci/golangci-lint/v2/pkg/timeutils"
 )
 
+const actionWorkersPerProcessor = 4
+
 var (
 	debugf = logutils.Debug(logutils.DebugKeyGoAnalysis)
 
@@ -159,7 +161,6 @@ func (r *runner) makeAction(a *analysis.Analyzer, pkg *packages.Package,
 	act.runner = r
 	act.isInitialPkg = initialPkgs[pkg]
 	act.needAnalyzeSource = initialPkgs[pkg]
-	act.analysisDoneCh = make(chan struct{})
 
 	depsCount := len(a.Requires)
 	if len(a.FactTypes) > 0 {
@@ -296,6 +297,8 @@ func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyze
 	debugf("Analyzing at most %d packages in parallel", gomaxprocs)
 
 	loadSem := make(chan struct{}, gomaxprocs)
+	// Preserve measured execution width while bounding queued action goroutines.
+	actionWorkers := newActionWorkerPool(actionWorkersPerProcessor*gomaxprocs, r.scheduler)
 
 	debugf("There are %d initial and %d total packages", len(initialPkgs), len(loadingPackages))
 
@@ -307,12 +310,13 @@ func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyze
 	for _, lp := range loadingPackages {
 		if lp.isInitial {
 			wg.Go(func() {
-				lp.analyzeRecursive(ctx, cancel, r.loadMode, loadSem)
+				lp.analyzeRecursive(ctx, cancel, r.loadMode, loadSem, actionWorkers)
 			})
 		}
 	}
 
 	wg.Wait()
+	actionWorkers.close()
 
 	stats := analysisStats{
 		initialPackages: len(initialPkgs),
