@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/golangci-supervisor"]
+members = ["crates/golangci-protocol", "crates/golangci-supervisor"]
 resolver = "2"
 
 [workspace.package]
@@ -11,5 +11,5 @@ rust-version = "1.95"
 command-group = "=5.0.1"
 ctrlc = { version = "=3.5.2", features = ["termination"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["arbitrary_precision", "raw_value"] }
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }

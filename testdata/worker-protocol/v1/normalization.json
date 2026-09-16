@@ -1,0 +1,12 @@
+[
+  {
+    "name": "literal-line-separators",
+    "input": "{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"line\u2028paragraph\u2029end\",\"capabilities\":[\"diagnostics\"]}}\n",
+    "canonical": "{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"line\\u2028paragraph\\u2029end\",\"capabilities\":[\"diagnostics\"]}}\n"
+  },
+  {
+    "name": "payload-whitespace",
+    "input": "{ \"protocol_version\" : 1, \"kind\" : \"hello\", \"payload\" : { \"client\" : \"controller value\", \"capabilities\" : [ \"diagnostics\" ] } }\n",
+    "canonical": "{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"controller value\",\"capabilities\":[\"diagnostics\"]}}\n"
+  }
+]

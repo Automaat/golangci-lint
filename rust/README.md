@@ -16,6 +16,12 @@ GOLANGCI_SUPERVISOR_TARGET=/path/to/golangci-lint \
   target/release/golangci-supervisor run ./...
 ```
 
+`golangci-protocol` is the second Rust boundary. It defines the versioned
+JSON-lines contract for a future Go analysis worker; the matching Go codec and
+shared golden vectors keep both implementations byte-compatible. It is not yet
+connected to either executable, so it cannot change CLI behavior. The wire
+contract is documented in `../testdata/worker-protocol/README.md`.
+
 ## Configuration
 
 The supervisor consumes these environment variables and removes them from the

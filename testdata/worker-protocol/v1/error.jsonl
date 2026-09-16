@@ -1,0 +1,2 @@
+{"protocol_version":1,"kind":"hello","payload":{"client":"golangci-supervisor","capabilities":["diagnostics"]}}
+{"protocol_version":1,"kind":"error","sequence":1,"payload":{"code":"handshake_failed","message":"required capability is unavailable","fatal":true}}
