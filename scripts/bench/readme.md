@@ -91,6 +91,19 @@ niceness 10, and five minutes. `dist/bench/bin/pair.json` records resolved refs,
 commits, binary hashes, and limits. Override refs with `BENCH_CANDIDATE_REF` and
 `BENCH_UPSTREAM_REF`.
 
+Run the pinned directive compatibility corpus:
+
+```bash
+GOMAXPROCS=2 GOFLAGS=-p=2 mise exec go@1.26.0 -- make bench_compat_corpus
+```
+
+The corpus covers diagnostics, custom configuration, compile errors, cgo,
+path exclusions, and test inclusion. Each case selects its own working
+directory and package inside one pinned checkout. Restrict a smoke run with
+`BENCH_CORPUS_SCENARIO=diagnostic-config`. The target always compares at
+concurrency 1 with a two-minute timeout, two Go processes, niceness 10, and a
+1 GiB RSS ceiling.
+
 For the multi-module workload, always select a module. Do not run its root above
 concurrency 1 under a 1 GiB RSS limit:
 

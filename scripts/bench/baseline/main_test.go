@@ -173,6 +173,24 @@ func TestValidateManifestRejectsDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRejectsEscapingScenarioWorkDir(t *testing.T) {
+	m := manifest{
+		SchemaVersion: schemaVersion,
+		GoVersion:     "go1.26.0",
+		Concurrency:   []int{1},
+		Runs:          1,
+		Workloads: []workload{{
+			Name:     "small",
+			URL:      "https://example.com/repo.git",
+			Revision: "0123456789abcdef0123456789abcdef01234567",
+		}},
+		Scenarios: []scenario{{Name: "escape", WorkDir: "../outside"}},
+	}
+	if err := validateManifest(&m); err == nil {
+		t.Fatal("expected escaping scenario working directory to fail")
+	}
+}
+
 func TestLoadManifestRejectsTrailingData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manifest.json")
 	if err := os.WriteFile(path, []byte(`{} {}`), 0o600); err != nil {
@@ -209,7 +227,7 @@ func TestArtifactBase(t *testing.T) {
 		binary{Label: "fork"},
 		&preparedWorkload{workload: workload{Name: "multi"}},
 		"scripts/tool",
-		scenario{Name: "configured"},
+		&scenario{Name: "configured"},
 		4,
 		2,
 		"cold",
@@ -225,12 +243,25 @@ func TestCompatibilityCaseBase(t *testing.T) {
 	actual := compatibilityCaseBase(
 		&preparedWorkload{workload: workload{Name: "multi"}},
 		"scripts/tool",
-		scenario{Name: "goanalysis"},
+		&scenario{Name: "goanalysis"},
 		2,
 	)
 	expected := "multi-scripts_tool-goanalysis-j2"
 	if actual != expected {
 		t.Fatalf("expected %q, got %q", expected, actual)
+	}
+}
+
+func TestCompatibilityOutputArgsDisableIssueLimits(t *testing.T) {
+	args := compatibilityOutputArgs("issues.json")
+	for _, expected := range []string{
+		"--max-same-issues=0",
+		"--max-issues-per-linter=0",
+		"--output.json.path=issues.json",
+	} {
+		if !slices.Contains(args, expected) {
+			t.Fatalf("expected %q in %v", expected, args)
+		}
 	}
 }
 
@@ -245,7 +276,7 @@ func TestReplaceEnv(t *testing.T) {
 func TestBuildRunArgsUsesSafetyTimeout(t *testing.T) {
 	tests := false
 	args, err := buildRunArgs(
-		&preparedWorkload{workload: workload{Tests: &tests}}, scenario{}, 2, 3*time.Minute, nil,
+		&preparedWorkload{workload: workload{Tests: &tests}}, &scenario{}, 2, 3*time.Minute, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -258,6 +289,42 @@ func TestBuildRunArgsUsesSafetyTimeout(t *testing.T) {
 	}
 	if !slices.Contains(args, "--allow-serial-runners") {
 		t.Fatalf("expected serial runner lock argument, got %v", args)
+	}
+}
+
+func TestBuildRunArgsUsesScenarioPackages(t *testing.T) {
+	args, err := buildRunArgs(
+		&preparedWorkload{workload: workload{Packages: []string{"./..."}}},
+		&scenario{Packages: []string{"testdata/example.go"}},
+		1,
+		time.Minute,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args[len(args)-1] != "testdata/example.go" {
+		t.Fatalf("expected scenario package, got %v", args)
+	}
+}
+
+func TestResolveWorkDir(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "module")
+	workDir := filepath.Join(target, "testdata")
+	if err := os.MkdirAll(workDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	actual, err := resolveWorkDir(root, "module", "testdata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual != workDir {
+		t.Fatalf("expected %s, got %s", workDir, actual)
+	}
+	if _, err := resolveWorkDir(root, "module", "../../outside"); err == nil {
+		t.Fatal("expected escaping working directory to fail")
 	}
 }
 

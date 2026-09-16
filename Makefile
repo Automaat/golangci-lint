@@ -85,6 +85,7 @@ BENCH_FORK_BIN ?= $(CURDIR)/dist/bench/bin/fork
 BENCH_PAIR_DIR ?= $(CURDIR)/dist/bench/bin
 BENCH_CANDIDATE_REF ?= HEAD
 BENCH_UPSTREAM_REF ?= upstream/main
+BENCH_COMPAT_MANIFEST ?= scripts/bench/compatibility.json
 
 bench_baseline:
 	mkdir -p $(dir $(BENCH_FORK_BIN))
@@ -121,6 +122,21 @@ bench_compat:
 		--nice 10 \
 		$(BENCH_ARGS)
 .PHONY: bench_compat
+
+bench_compat_corpus:
+	$(MAKE) bench_pair
+	GOMAXPROCS=2 GOFLAGS=-p=2 GOMEMLIMIT=1024MiB go run ./scripts/bench/baseline \
+		--manifest $(BENCH_COMPAT_MANIFEST) \
+		--fork-bin $(BENCH_PAIR_DIR)/fork$(suffix $(BINARY)) \
+		--upstream-bin $(BENCH_PAIR_DIR)/upstream$(suffix $(BINARY)) \
+		--compatibility \
+		--workload directive-corpus \
+		--concurrency 1 \
+		--run-timeout 2m \
+		--max-rss-mib 1024 \
+		--go-max-procs 2 \
+		--nice 10 $(if $(BENCH_CORPUS_SCENARIO),--scenario $(BENCH_CORPUS_SCENARIO))
+.PHONY: bench_compat_corpus
 
 bench_compare:
 	go run ./scripts/bench/compare $(COMPARE_ARGS)
