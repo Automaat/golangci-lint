@@ -66,6 +66,8 @@ type workload struct {
 type scenario struct {
 	Name      string   `json:"name"`
 	UseConfig bool     `json:"use_config,omitempty"`
+	WorkDir   string   `json:"work_dir,omitempty"`
+	Packages  []string `json:"packages,omitempty"`
 	Args      []string `json:"args,omitempty"`
 }
 
@@ -512,6 +514,17 @@ func validateScenarios(scenarios []scenario) error {
 		if item.UseConfig && slices.Contains(item.Args, "--no-config") {
 			return fmt.Errorf("scenario %q cannot use config and --no-config", item.Name)
 		}
+		if filepath.IsAbs(item.WorkDir) {
+			return fmt.Errorf("scenario %q working directory must be relative", item.Name)
+		}
+		if item.WorkDir == ".." || strings.HasPrefix(filepath.Clean(item.WorkDir), ".."+string(filepath.Separator)) {
+			return fmt.Errorf("scenario %q working directory escapes the workload target", item.Name)
+		}
+		for _, pkg := range item.Packages {
+			if strings.TrimSpace(pkg) == "" {
+				return fmt.Errorf("scenario %q packages cannot contain an empty value", item.Name)
+			}
+		}
 	}
 
 	return nil
@@ -900,7 +913,8 @@ func (r *runner) runTimingMatrix(concurrency []int, runs int) error {
 	for i := range r.workloads {
 		workload := &r.workloads[i]
 		for _, target := range workload.Targets {
-			for _, scenario := range r.scenarios {
+			for scenarioIndex := range r.scenarios {
+				scenario := &r.scenarios[scenarioIndex]
 				for _, value := range concurrency {
 					for _, bin := range r.binaries {
 						if r.opts.Prepare {
@@ -945,7 +959,8 @@ func (r *runner) runCompatibility(concurrency []int) error {
 	for i := range r.workloads {
 		workload := &r.workloads[i]
 		for _, target := range workload.Targets {
-			for _, scenario := range r.scenarios {
+			for scenarioIndex := range r.scenarios {
+				scenario := &r.scenarios[scenarioIndex]
 				for _, value := range concurrency {
 					inputs := make(map[string]diagnostics.Input, len(binaries))
 					for _, label := range []string{"upstream", "fork"} {
@@ -955,7 +970,7 @@ func (r *runner) runCompatibility(concurrency []int) error {
 						cacheDir := r.cacheDir(bin, workload, target, scenario, value, "compatibility")
 						stats, err := r.execute(
 							bin, workload, target, scenario, value, 1, "cold", "compatibility", cacheDir, artifact,
-							"--issues-exit-code=1", "--show-stats=false", "--output.json.path="+artifact,
+							compatibilityOutputArgs(artifact)...,
 						)
 						if err != nil {
 							return err
@@ -983,6 +998,16 @@ func (r *runner) runCompatibility(concurrency []int) error {
 	return nil
 }
 
+func compatibilityOutputArgs(artifact string) []string {
+	return []string{
+		"--issues-exit-code=1",
+		"--show-stats=false",
+		"--max-same-issues=0",
+		"--max-issues-per-linter=0",
+		"--output.json.path=" + artifact,
+	}
+}
+
 func (r *runner) runProfiles() error {
 	profiles := []struct {
 		purpose string
@@ -1004,7 +1029,8 @@ func (r *runner) runProfiles() error {
 		if !slices.Contains(workload.Targets, target) {
 			return fmt.Errorf("workload %q profile module %q is not in modules", workload.Name, target)
 		}
-		for _, scenario := range r.scenarios {
+		for scenarioIndex := range r.scenarios {
+			scenario := &r.scenarios[scenarioIndex]
 			for _, bin := range r.binaries {
 				for _, profile := range profiles {
 					base := artifactBase(bin, workload, target, scenario, r.opts.ProfileConcurrency, 1, "cold", profile.purpose)
@@ -1029,7 +1055,7 @@ func (r *runner) cacheDir(
 	bin binary,
 	workload *preparedWorkload,
 	target string,
-	scenario scenario,
+	scenario *scenario,
 	concurrency int,
 	key string,
 ) string {
@@ -1043,7 +1069,7 @@ func (r *runner) execute(
 	bin binary,
 	workload *preparedWorkload,
 	target string,
-	scenario scenario,
+	scenario *scenario,
 	concurrency int,
 	iteration int,
 	cacheMode string,
@@ -1055,7 +1081,7 @@ func (r *runner) execute(
 	if err := os.MkdirAll(cacheDir, privateDirMode); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
-	workDir, err := safeJoin(workload.Root, target)
+	workDir, err := resolveWorkDir(workload.Root, target, scenario.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve workload target: %w", err)
 	}
@@ -1147,7 +1173,7 @@ func (r *runner) recordExecution(
 	bin binary,
 	workload *preparedWorkload,
 	target string,
-	scenario scenario,
+	scenario *scenario,
 	concurrency int,
 	iteration int,
 	cacheMode string,
@@ -1197,7 +1223,7 @@ func (r *runner) recordExecution(
 
 func buildRunArgs(
 	workload *preparedWorkload,
-	scenario scenario,
+	scenario *scenario,
 	concurrency int,
 	runTimeout time.Duration,
 	extra []string,
@@ -1231,12 +1257,27 @@ func buildRunArgs(
 			args = append(args, value)
 		}
 	}
-	packages := workload.Packages
+	packages := scenario.Packages
+	if len(packages) == 0 {
+		packages = workload.Packages
+	}
 	if len(packages) == 0 {
 		packages = []string{"./..."}
 	}
 
 	return append(args, packages...), nil
+}
+
+func resolveWorkDir(root, target, scenarioDir string) (string, error) {
+	workDir, err := safeJoin(root, target)
+	if err != nil {
+		return "", err
+	}
+	if scenarioDir == "" {
+		return workDir, nil
+	}
+
+	return safeJoin(workDir, scenarioDir)
 }
 
 func (r *runner) newBenchmarkCommand(
@@ -1329,7 +1370,7 @@ func artifactBase(
 	bin binary,
 	workload *preparedWorkload,
 	target string,
-	scenario scenario,
+	scenario *scenario,
 	concurrency int,
 	iteration int,
 	cacheMode string,
@@ -1350,7 +1391,7 @@ func artifactBase(
 func compatibilityCaseBase(
 	workload *preparedWorkload,
 	target string,
-	scenario scenario,
+	scenario *scenario,
 	concurrency int,
 ) string {
 	return strings.Join([]string{

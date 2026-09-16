@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "go_version": "go1.26.0",
+  "concurrency": [1],
+  "runs": 1,
+  "workloads": [
+    {
+      "name": "directive-corpus",
+      "url": "https://github.com/Automaat/golangci-lint.git",
+      "revision": "2b3d9864a624c76500478b1bc7b0414cbf032f96",
+      "modules": ["."]
+    }
+  ],
+  "scenarios": [
+    {
+      "name": "diagnostic-config",
+      "work_dir": "pkg/golinters/misspell",
+      "packages": ["testdata/misspell.go"],
+      "args": [
+        "--default=none",
+        "-Emisspell",
+        "--config=testdata/misspell.yml"
+      ]
+    },
+    {
+      "name": "custom-config",
+      "work_dir": "pkg/golinters/misspell",
+      "packages": ["testdata/misspell_custom.go"],
+      "args": [
+        "--default=none",
+        "-Emisspell",
+        "--config=testdata/misspell_custom.yml"
+      ]
+    },
+    {
+      "name": "compile-error",
+      "work_dir": "test",
+      "packages": ["testdata/notcompiles/typecheck.go"],
+      "args": [
+        "--no-config",
+        "--default=none",
+        "-Emodernize"
+      ]
+    },
+    {
+      "name": "cgo",
+      "work_dir": "pkg/golinters/unconvert",
+      "packages": ["testdata/unconvert_cgo.go"],
+      "args": [
+        "--no-config",
+        "--default=none",
+        "-Eunconvert"
+      ]
+    },
+    {
+      "name": "path-exclusion",
+      "work_dir": "test",
+      "packages": ["testdata/path_except.go"],
+      "args": [
+        "--default=none",
+        "-Eforbidigo",
+        "--config=testdata/configs/path-except.yml"
+      ]
+    },
+    {
+      "name": "tests-enabled",
+      "work_dir": "test",
+      "packages": ["testdata/used_only_in_tests"],
+      "args": [
+        "--no-config",
+        "--default=none",
+        "-Eunused",
+        "--tests=true"
+      ]
+    },
+    {
+      "name": "tests-disabled",
+      "work_dir": "test",
+      "packages": ["testdata/used_only_in_tests"],
+      "args": [
+        "--no-config",
+        "--default=none",
+        "-Eunused",
+        "--tests=false"
+      ]
+    }
+  ]
+}
