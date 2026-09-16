@@ -1,14 +1,13 @@
 package goanalysis
 
 import (
-	"errors"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"io"
+	"slices"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/types/objectpath"
-
-	"github.com/golangci/golangci-lint/v2/internal/cache"
 )
 
 type Fact struct {
@@ -40,11 +39,9 @@ func (act *action) readCachedFacts() bool {
 			return true // no need to load facts
 		}
 
-		facts, ok := act.readPersistedFacts()
-		if !ok {
+		if act.cachedFacts == nil {
 			return false
 		}
-		act.cachedFacts = facts
 
 		return true
 	}()
@@ -82,7 +79,7 @@ func (act *action) inheritFactsFromDeps() {
 	}
 }
 
-func (act *action) persistFactsToCache() error {
+func (act *action) persistedFacts() []Fact {
 	analyzer := act.Analyzer
 
 	if len(analyzer.FactTypes) == 0 {
@@ -132,25 +129,7 @@ func (act *action) persistFactsToCache() error {
 
 	factsCacheDebugf("Caching %d facts for package %q and analyzer %s", len(facts), act.Package.Name, act.Analyzer.Name)
 
-	return act.runner.pkgCache.Put(act.Package, cache.HashModeNeedAllDeps, factCacheKey(analyzer), facts)
-}
-
-func (act *action) readPersistedFacts() ([]Fact, bool) {
-	var facts []Fact
-
-	err := act.runner.pkgCache.Get(act.Package, cache.HashModeNeedAllDeps, factCacheKey(act.Analyzer), &facts)
-	if err != nil {
-		if !errors.Is(err, cache.ErrMissing) && !errors.Is(err, io.EOF) {
-			act.runner.log.Warnf("Failed to get persisted facts: %s", err)
-		}
-
-		factsCacheDebugf("No cached facts for package %q and analyzer %s", act.Package.Name, act.Analyzer.Name)
-
-		return nil, false
-	}
-
-	factsCacheDebugf("Loaded %d cached facts for package %q and analyzer %s", len(facts), act.Package.Name, act.Analyzer.Name)
-	return facts, true
+	return facts
 }
 
 func (act *action) applyPersistedFacts(facts []Fact) {
@@ -180,6 +159,19 @@ func (act *action) applyPersistedFacts(facts []Fact) {
 	}
 }
 
-func factCacheKey(a *analysis.Analyzer) string {
-	return fmt.Sprintf("%s/facts", a.Name)
+func factCacheKey(prefix string, actions []*action) string {
+	var analyzerNames []string
+	for _, act := range actions {
+		if len(act.Analyzer.FactTypes) != 0 {
+			analyzerNames = append(analyzerNames, act.Analyzer.Name)
+		}
+	}
+	slices.Sort(analyzerNames)
+
+	hash := sha256.New()
+	for _, name := range analyzerNames {
+		fmt.Fprintf(hash, "%d:%s\n", len(name), name)
+	}
+
+	return prefix + "/facts-v2/" + hex.EncodeToString(hash.Sum(nil))
 }
