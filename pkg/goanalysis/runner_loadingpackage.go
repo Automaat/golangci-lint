@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/scanner"
 	"go/types"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/tools/go/gcexportdata"
 	"golang.org/x/tools/go/packages"
 
+	"github.com/golangci/golangci-lint/v2/internal/cache"
 	"github.com/golangci/golangci-lint/v2/pkg/goanalysis/load"
 	"github.com/golangci/golangci-lint/v2/pkg/goutil"
 	"github.com/golangci/golangci-lint/v2/pkg/logutils"
@@ -40,6 +42,7 @@ type loadingPackage struct {
 	analyzeOnce sync.Once
 	decUseMutex sync.Mutex
 	scheduler   *schedulerMetrics
+	cachedFacts map[string][]Fact
 }
 
 func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.CancelFunc, loadMode LoadMode,
@@ -107,9 +110,95 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 		act.analyzeSafe()
 		return act.Err
 	})
+	if cacheErr := lp.persistFactsToCache(); cacheErr != nil {
+		lp.log.Warnf("Failed to persist facts to cache: %s", cacheErr)
+	}
 	if err != nil {
 		cancel()
 	}
+}
+
+func (lp *loadingPackage) readCachedFacts() {
+	if lp.isInitial {
+		return
+	}
+
+	var cacheAct *action
+	for _, act := range lp.actions {
+		if len(act.Analyzer.FactTypes) != 0 && !act.loadCachedFactsDone {
+			cacheAct = act
+			break
+		}
+	}
+	if cacheAct == nil {
+		return
+	}
+
+	var factsByAnalyzer map[string][]Fact
+	err := cacheAct.runner.pkgCache.Get(lp.pkg, cache.HashModeNeedAllDeps,
+		factCacheKey(cacheAct.runner.prefix, lp.actions), &factsByAnalyzer)
+	if err != nil {
+		if !errors.Is(err, cache.ErrMissing) && !errors.Is(err, io.EOF) {
+			lp.log.Warnf("Failed to get persisted facts: %s", err)
+		}
+		factsByAnalyzer = nil
+	}
+	lp.cachedFacts = factsByAnalyzer
+	if factsByAnalyzer != nil {
+		factsCacheDebugf("Loaded fact bundle for package %q with %d analyzers",
+			lp.pkg.Name, len(factsByAnalyzer))
+	}
+
+	for _, act := range lp.actions {
+		act.loadCachedFactsDone = true
+		if len(act.Analyzer.FactTypes) == 0 {
+			act.loadCachedFactsOk = true
+			continue
+		}
+
+		facts, ok := factsByAnalyzer[act.Analyzer.Name]
+		act.loadCachedFactsOk = ok
+		if ok {
+			act.cachedFacts = facts
+			factsCacheDebugf("Loaded %d cached facts for package %q and analyzer %s",
+				len(facts), lp.pkg.Name, act.Analyzer.Name)
+		} else {
+			factsCacheDebugf("No cached facts for package %q and analyzer %s",
+				lp.pkg.Name, act.Analyzer.Name)
+		}
+	}
+}
+
+func (lp *loadingPackage) persistFactsToCache() error {
+	defer func() { lp.cachedFacts = nil }()
+
+	var cacheAct *action
+	factsByAnalyzer := make(map[string][]Fact, len(lp.cachedFacts))
+	for name, facts := range lp.cachedFacts {
+		factsByAnalyzer[name] = facts
+	}
+
+	changed := false
+	for _, act := range lp.actions {
+		if len(act.Analyzer.FactTypes) == 0 || !act.needAnalyzeSource {
+			continue
+		}
+
+		cacheAct = act
+		delete(factsByAnalyzer, act.Analyzer.Name)
+		changed = true
+		if act.pass != nil {
+			factsByAnalyzer[act.Analyzer.Name] = act.persistedFacts()
+		}
+	}
+	if !changed {
+		return nil
+	}
+	factsCacheDebugf("Caching fact bundle for package %q with %d analyzers",
+		lp.pkg.Name, len(factsByAnalyzer))
+
+	return cacheAct.runner.pkgCache.Put(lp.pkg, cache.HashModeNeedAllDeps,
+		factCacheKey(cacheAct.runner.prefix, lp.actions), factsByAnalyzer)
 }
 
 func (lp *loadingPackage) loadFromSource(loadMode LoadMode) error {
@@ -294,14 +383,20 @@ func (lp *loadingPackage) loadWithFacts(loadMode LoadMode) error {
 	if pkg.TypesInfo != nil {
 		// Already loaded package, e.g. because another not go/analysis linter required types for deps.
 		// Try load cached facts for it.
+		lp.readCachedFacts()
 
+		needAnalyzeSource := false
 		for _, act := range lp.actions {
 			if !act.loadCachedFacts() {
 				// Cached facts loading failed: analyze later the action from source.
 				act.needAnalyzeSource = true
+				needAnalyzeSource = true
 				factsCacheDebugf("Loading of facts for already loaded %s failed, analyze it from source later", act)
 				act.markDepsForAnalyzingSource()
 			}
+		}
+		if !needAnalyzeSource {
+			lp.cachedFacts = nil
 		}
 		return nil
 	}
@@ -317,6 +412,7 @@ func (lp *loadingPackage) loadWithFacts(loadMode LoadMode) error {
 
 func (lp *loadingPackage) loadImportedPackageWithFacts(loadMode LoadMode) error {
 	pkg := lp.pkg
+	lp.readCachedFacts()
 
 	needLoadFromSource := false
 	for _, act := range lp.actions {
@@ -371,6 +467,9 @@ func (lp *loadingPackage) loadImportedPackageWithFacts(loadMode LoadMode) error 
 			continue
 		}
 		act.applyCachedFacts()
+	}
+	if !needLoadFromSource {
+		lp.cachedFacts = nil
 	}
 
 	return nil

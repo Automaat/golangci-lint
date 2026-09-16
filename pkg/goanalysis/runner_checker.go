@@ -208,10 +208,6 @@ func (act *action) analyze() {
 	pass.ExportObjectFact = nil
 	pass.ExportPackageFact = nil
 
-	err := act.persistFactsToCache()
-	if err != nil {
-		act.runner.log.Warnf("Failed to persist facts to cache: %s", err)
-	}
 }
 
 // NOTE(ldez) altered: logger; sanityCheck.

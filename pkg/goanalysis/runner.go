@@ -49,10 +49,15 @@ type Diagnostic struct {
 	File     *token.File
 }
 
+type factCache interface {
+	Put(*packages.Package, cache.HashMode, string, any) error
+	Get(*packages.Package, cache.HashMode, string, any) error
+}
+
 type runner struct {
 	log            logutils.Log
 	prefix         string // ensure unique analyzer names
-	pkgCache       *cache.Cache
+	pkgCache       factCache
 	loadGuard      *load.Guard
 	loadMode       LoadMode
 	passToPkg      map[*analysis.Pass]*packages.Package
