@@ -1,0 +1,185 @@
+[
+  {
+    "name": "malformed-json",
+    "error_class": "malformed_json",
+    "records": ["{"]
+  },
+  {
+    "name": "malformed-primitive-before-duplicate",
+    "error_class": "malformed_json",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\",\"payload\":{\"x\":truX,\"x\":1}}"]
+  },
+  {
+    "name": "malformed-escape-before-duplicate",
+    "error_class": "malformed_json",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\",\"payload\":{\"x\":\"bad\\q\",\"x\":1}}"]
+  },
+  {
+    "name": "non-utf8",
+    "error_class": "malformed_json",
+    "hex_record": "ff"
+  },
+  {
+    "name": "unpaired-utf16-surrogate",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"bad\\uD800\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "truncated-unpaired-utf16-surrogate",
+    "error_class": "malformed_json",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"bad\\uD800"]
+  },
+  {
+    "name": "closed-unpaired-utf16-surrogate-before-malformed-tail",
+    "error_class": "malformed_json",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"bad\\uD800\",\"capabilities\":[\"diagnostics\"]}"]
+  },
+  {
+    "name": "trailing-truncated-unpaired-utf16-surrogate",
+    "error_class": "malformed_json",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\",\"payload\":{}}\"bad\\uD800"]
+  },
+  {
+    "name": "trailing-json",
+    "error_class": "malformed_json",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\",\"payload\":{}}{}"]
+  },
+  {
+    "name": "unsupported-version",
+    "error_class": "unsupported_version",
+    "records": ["{\"protocol_version\":2,\"kind\":\"hello\",\"payload\":{\"client\":\"controller\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "unknown-kind",
+    "error_class": "unknown_kind",
+    "records": ["{\"protocol_version\":1,\"kind\":\"ping\",\"payload\":{}}"]
+  },
+  {
+    "name": "unknown-envelope-field",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\",\"extra\":true,\"payload\":{}}"]
+  },
+  {
+    "name": "case-folded-sequence-field",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"ready\",\"Sequence\":1,\"payload\":{\"worker\":\"worker\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "case-folded-request-id-field",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"run\",\"Request_ID\":\"run-1\",\"payload\":{\"args\":[\"run\"],\"working_directory\":\"/workspace\",\"environment\":{}}}"]
+  },
+  {
+    "name": "duplicate-envelope-field",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"kind\":\"shutdown\",\"payload\":{}}"]
+  },
+  {
+    "name": "duplicate-payload-field",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"error\",\"sequence\":1,\"payload\":{\"code\":\"first\",\"code\":\"second\",\"message\":\"failed\",\"fatal\":true}}"]
+  },
+  {
+    "name": "missing-envelope-field",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\"}"]
+  },
+  {
+    "name": "missing-run-id",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"run\",\"payload\":{\"args\":[\"run\"],\"working_directory\":\"/workspace\",\"environment\":{}}}"]
+  },
+  {
+    "name": "empty-optional-request-id",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"request_id\":\"\",\"payload\":{\"client\":\"controller\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "client-sequence",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"sequence\":1,\"payload\":{\"client\":\"controller\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "explicit-zero-client-sequence",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"sequence\":0,\"payload\":{\"client\":\"controller\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "missing-worker-sequence",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":\"ready\",\"payload\":{\"worker\":\"worker\",\"capabilities\":[\"diagnostics\"]}}"]
+  },
+  {
+    "name": "non-monotonic-sequence",
+    "error_class": "invalid_sequence",
+    "records": [
+      "{\"protocol_version\":1,\"kind\":\"ready\",\"sequence\":2,\"payload\":{\"worker\":\"worker\",\"capabilities\":[\"diagnostics\"]}}",
+      "{\"protocol_version\":1,\"kind\":\"error\",\"sequence\":2,\"payload\":{\"code\":\"stalled\",\"message\":\"worker stalled\",\"fatal\":true}}"
+    ]
+  },
+  {
+    "name": "payload-not-object",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"shutdown\",\"payload\":null}"]
+  },
+  {
+    "name": "null-protocol-version",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":null,\"kind\":\"shutdown\",\"payload\":{}}"]
+  },
+  {
+    "name": "null-kind",
+    "error_class": "invalid_envelope",
+    "records": ["{\"protocol_version\":1,\"kind\":null,\"payload\":{}}"]
+  },
+  {
+    "name": "invalid-diagnostic-position",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"diagnostic\",\"request_id\":\"run-1\",\"sequence\":1,\"payload\":{\"linter\":\"govet\",\"message\":\"bad call\",\"path\":\"pkg/example.go\",\"line\":0,\"column\":1,\"severity\":\"warning\"}}"]
+  },
+  {
+    "name": "missing-completion-field",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"complete\",\"request_id\":\"run-1\",\"sequence\":1,\"payload\":{\"issues\":0,\"elapsed_ns\":1}}"]
+  },
+  {
+    "name": "null-required-payload-field",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"error\",\"sequence\":1,\"payload\":{\"code\":\"failed\",\"message\":\"failed\",\"fatal\":null}}"]
+  },
+  {
+    "name": "null-array-element",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"hello\",\"payload\":{\"client\":\"controller\",\"capabilities\":[null]}}"]
+  },
+  {
+    "name": "null-environment-value",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"run\",\"request_id\":\"run-1\",\"payload\":{\"args\":[\"run\"],\"working_directory\":\"/workspace\",\"environment\":{\"GOOS\":null}}}"]
+  },
+  {
+    "name": "null-metric-value",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"lifecycle\",\"request_id\":\"run-1\",\"sequence\":1,\"payload\":{\"phase\":\"load\",\"state\":\"completed\",\"elapsed_ns\":1,\"metrics\":{\"packages\":null}}}"]
+  },
+  {
+    "name": "null-optional-error",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"lifecycle\",\"request_id\":\"run-1\",\"sequence\":1,\"payload\":{\"phase\":\"load\",\"state\":\"completed\",\"elapsed_ns\":1,\"metrics\":{},\"error\":null}}"]
+  },
+  {
+    "name": "null-optional-context-error",
+    "error_class": "invalid_payload",
+    "records": ["{\"protocol_version\":1,\"kind\":\"complete\",\"request_id\":\"run-1\",\"sequence\":1,\"payload\":{\"exit_code\":0,\"issues\":0,\"elapsed_ns\":1,\"context_error\":null}}"]
+  },
+  {
+    "name": "too-large",
+    "error_class": "too_large",
+    "oversized_bytes": 1048577
+  },
+  {
+    "name": "too-deep",
+    "error_class": "invalid_envelope",
+    "nested_arrays": 63
+  }
+]

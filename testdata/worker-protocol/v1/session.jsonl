@@ -1,0 +1,8 @@
+{"protocol_version":1,"kind":"hello","payload":{"client":"golangci-supervisor","capabilities":["cancel","diagnostics","lifecycle"],"trace_context":"golden-session","future_number":1e400,"paired_surrogate":"\uD83D\uDE00"}}
+{"protocol_version":1,"kind":"ready","sequence":1,"payload":{"worker":"golangci-go-worker","capabilities":["cancel","diagnostics","lifecycle"]}}
+{"protocol_version":1,"kind":"run","request_id":"run-1","payload":{"args":["run","./..."],"working_directory":"/workspace","environment":{"GOMAXPROCS":"2","GOMEMLIMIT":"1024MiB"}}}
+{"protocol_version":1,"kind":"lifecycle","request_id":"run-1","sequence":2,"payload":{"phase":"package_load","state":"completed","elapsed_ns":12000000,"metrics":{"deduplicated_packages":7,"original_packages":8}}}
+{"protocol_version":1,"kind":"diagnostic","request_id":"run-1","sequence":3,"payload":{"linter":"govet","message":"printf format %d reads arg #1, but call has 0 args","path":"pkg/example.go","line":12,"column":3,"severity":"warning"}}
+{"protocol_version":1,"kind":"cancel","request_id":"run-1","payload":{"reason":"controller deadline"}}
+{"protocol_version":1,"kind":"complete","request_id":"run-1","sequence":4,"payload":{"exit_code":130,"issues":1,"elapsed_ns":15000000}}
+{"protocol_version":1,"kind":"shutdown","payload":{}}

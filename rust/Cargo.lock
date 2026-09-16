@@ -63,6 +63,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "golangci-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "golangci-supervisor"
 version = "0.1.0"
 dependencies = [
