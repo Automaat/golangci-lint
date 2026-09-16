@@ -33,6 +33,13 @@ The versioned report records the termination class, child exit or signal,
 elapsed time, peak tree RSS, cancellation latency, cleanup result, and wrapper
 error. Standard output and standard error remain the child's streams.
 
+The Go child can independently emit detailed phase metrics by setting
+`GOLANGCI_LIFECYCLE_REPORT` to a JSON output path. The supervisor passes this
+variable through unchanged. Its versioned report covers package loading,
+analysis graph size and cache use, each optimized linter invocation, each
+configured Go-analysis linter and analyzer, result processing, and the final Go
+exit state. Report-write failures warn without changing the Go exit code.
+
 Normal child exits are preserved. Supervisor-owned exits are `124` for timeout,
 `125` for RSS limit, `126` for supervisor failure, `127` for child startup
 failure, and `130` for cancellation. Use the report to distinguish a child

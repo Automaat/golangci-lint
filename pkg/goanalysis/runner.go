@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"time"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/packages"
@@ -55,19 +56,38 @@ type runner struct {
 	passToPkg      map[*analysis.Pass]*packages.Package
 	passToPkgGuard sync.Mutex
 	sw             *timeutils.Stopwatch
+	collectStats   bool
+}
+
+type analyzerStats struct {
+	analyzer        *analysis.Analyzer
+	elapsed         time.Duration
+	actions         int
+	executedActions int
+	diagnostics     int
+	errors          int
+}
+
+type analysisStats struct {
+	initialPackages int
+	totalPackages   int
+	actions         int
+	parallelism     int
+	analyzers       []analyzerStats
 }
 
 func newRunner(prefix string, logger logutils.Log, pkgCache *cache.Cache, loadGuard *load.Guard,
-	loadMode LoadMode, sw *timeutils.Stopwatch,
+	loadMode LoadMode, sw *timeutils.Stopwatch, collectStats bool,
 ) *runner {
 	return &runner{
-		prefix:    prefix,
-		log:       logger,
-		pkgCache:  pkgCache,
-		loadGuard: loadGuard,
-		loadMode:  loadMode,
-		passToPkg: map[*analysis.Pass]*packages.Package{},
-		sw:        sw,
+		prefix:       prefix,
+		log:          logger,
+		pkgCache:     pkgCache,
+		loadGuard:    loadGuard,
+		loadMode:     loadMode,
+		passToPkg:    map[*analysis.Pass]*packages.Package{},
+		sw:           sw,
+		collectStats: collectStats,
 	}
 }
 
@@ -77,12 +97,16 @@ func newRunner(prefix string, logger logutils.Log, pkgCache *cache.Cache, loadGu
 // It provides most of the logic for the main functions of both the
 // singlechecker and the multi-analysis commands.
 // It returns the appropriate exit code.
-func (r *runner) run(analyzers []*analysis.Analyzer, initialPackages []*packages.Package) ([]*Diagnostic,
-	[]error, map[*analysis.Pass]*packages.Package,
+func (r *runner) run(analyzers []*analysis.Analyzer, initialPackages []*packages.Package,
+	statsReady func(analysisStats),
+) ([]*Diagnostic, []error, map[*analysis.Pass]*packages.Package,
 ) {
 	debugf("Analyzing %d packages on load mode %s", len(initialPackages), r.loadMode)
 
-	roots := r.analyze(initialPackages, analyzers)
+	roots, stats := r.analyze(initialPackages, analyzers)
+	if statsReady != nil {
+		statsReady(stats)
+	}
 
 	diags, errs := extractDiagnostics(roots)
 
@@ -217,7 +241,7 @@ func (r *runner) prepareAnalysis(pkgs []*packages.Package,
 	return initialPkgs, allActions, roots
 }
 
-func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyzer) []*action {
+func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyzer) ([]*action, analysisStats) {
 	initialPkgs, actions, rootActions := r.prepareAnalysis(pkgs, analyzers)
 
 	actionPerPkg := map[*packages.Package][]*action{}
@@ -278,7 +302,45 @@ func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyze
 
 	wg.Wait()
 
-	return rootActions
+	stats := analysisStats{
+		initialPackages: len(initialPkgs),
+		totalPackages:   len(loadingPackages),
+		actions:         len(actions),
+		parallelism:     gomaxprocs,
+	}
+	if r.collectStats {
+		stats.analyzers = collectAnalyzerStats(actions)
+	}
+
+	return rootActions, stats
+}
+
+func collectAnalyzerStats(actions []*action) []analyzerStats {
+	byName := map[string]*analyzerStats{}
+	for _, act := range actions {
+		stats := byName[act.Analyzer.Name]
+		if stats == nil {
+			stats = &analyzerStats{analyzer: act.Analyzer}
+			byName[act.Analyzer.Name] = stats
+		}
+
+		stats.elapsed += act.Duration
+		stats.actions++
+		if act.Duration > 0 {
+			stats.executedActions++
+		}
+		stats.diagnostics += len(act.Diagnostics)
+		if act.Err != nil {
+			stats.errors++
+		}
+	}
+
+	var result []analyzerStats
+	for _, name := range slices.Sorted(maps.Keys(byName)) {
+		result = append(result, *byName[name])
+	}
+
+	return result
 }
 
 func extractDiagnostics(roots []*action) (retDiags []*Diagnostic, retErrors []error) {

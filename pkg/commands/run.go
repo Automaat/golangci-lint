@@ -35,6 +35,7 @@ import (
 	"github.com/golangci/golangci-lint/v2/pkg/goanalysis/load"
 	"github.com/golangci/golangci-lint/v2/pkg/goutil"
 	"github.com/golangci/golangci-lint/v2/pkg/lint"
+	"github.com/golangci/golangci-lint/v2/pkg/lint/lifecycle"
 	"github.com/golangci/golangci-lint/v2/pkg/lint/linter"
 	"github.com/golangci/golangci-lint/v2/pkg/lint/lintersdb"
 	"github.com/golangci/golangci-lint/v2/pkg/logutils"
@@ -67,6 +68,10 @@ type runOptions struct {
 	PrintResourcesUsage bool // Flag only.
 }
 
+type analysisRunnerFactory interface {
+	Build(*linter.Context) (lint.AnalysisRunner, error)
+}
+
 type runCommand struct {
 	viper *viper.Viper
 	cmd   *cobra.Command
@@ -86,7 +91,11 @@ type runCommand struct {
 	reportData *report.Data
 
 	contextBuilder *lint.ContextBuilder
+	runnerFactory  analysisRunnerFactory
 	goenv          *goutil.Env
+
+	lifecycleReportPath string
+	lifecycleRecorder   *lifecycle.Recorder
 
 	fileCache *fsutils.FileCache
 	lineCache *fsutils.LineCache
@@ -98,14 +107,21 @@ type runCommand struct {
 
 func newRunCommand(logger logutils.Log, info BuildInfo) *runCommand {
 	reportData := &report.Data{}
+	lifecycleReportPath := os.Getenv(lifecycle.EnvReportPath)
+	var lifecycleRecorder *lifecycle.Recorder
+	if lifecycleReportPath != "" {
+		lifecycleRecorder = lifecycle.NewRecorder()
+	}
 
 	c := &runCommand{
-		viper:      viper.New(),
-		log:        report.NewLogWrapper(logger, reportData),
-		debugf:     logutils.Debug(logutils.DebugKeyExec),
-		cfg:        config.NewDefault(),
-		reportData: reportData,
-		buildInfo:  info,
+		viper:               viper.New(),
+		log:                 report.NewLogWrapper(logger, reportData),
+		debugf:              logutils.Debug(logutils.DebugKeyExec),
+		cfg:                 config.NewDefault(),
+		reportData:          reportData,
+		buildInfo:           info,
+		lifecycleReportPath: lifecycleReportPath,
+		lifecycleRecorder:   lifecycleRecorder,
 	}
 
 	runCmd := &cobra.Command{
@@ -121,6 +137,11 @@ func newRunCommand(logger logutils.Log, info BuildInfo) *runCommand {
 
 	runCmd.SetOut(logutils.StdOut) // use custom output to properly color it in Windows terminals
 	runCmd.SetErr(logutils.StdErr)
+	runCmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		c.writeLifecycleReport(exitcodes.Failure, err, nil)
+
+		return err
+	})
 
 	fs := runCmd.Flags()
 	fs.SortFlags = false // sort them as they are defined here
@@ -145,7 +166,15 @@ func newRunCommand(logger logutils.Log, info BuildInfo) *runCommand {
 	return c
 }
 
-func (c *runCommand) persistentPreRunE(cmd *cobra.Command, args []string) error {
+func (c *runCommand) persistentPreRunE(cmd *cobra.Command, args []string) (retErr error) {
+	if c.lifecycleRecorder != nil {
+		defer func() {
+			if retErr != nil {
+				c.writeLifecycleReport(exitcodes.Failure, retErr, nil)
+			}
+		}()
+	}
+
 	if err := c.startTracing(); err != nil {
 		return err
 	}
@@ -177,7 +206,15 @@ func (c *runCommand) persistentPostRunE(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func (c *runCommand) preRunE(_ *cobra.Command, args []string) error {
+func (c *runCommand) preRunE(_ *cobra.Command, args []string) (retErr error) {
+	if c.lifecycleRecorder != nil {
+		defer func() {
+			if retErr != nil {
+				c.writeLifecycleReport(exitcodes.Failure, retErr, nil)
+			}
+		}()
+	}
+
 	dbManager, err := lintersdb.NewManager(c.log.Child(logutils.DebugKeyLintersDB), c.cfg,
 		lintersdb.NewLinterBuilder(), lintersdb.NewPluginModuleBuilder(c.log), lintersdb.NewPluginGoBuilder(c.log))
 	if err != nil {
@@ -207,7 +244,13 @@ func (c *runCommand) preRunE(_ *cobra.Command, args []string) error {
 
 	pkgLoader := lint.NewPackageLoader(c.log.Child(logutils.DebugKeyLoader), c.cfg, args, c.goenv, guard)
 
-	c.contextBuilder = lint.NewContextBuilder(c.cfg, pkgLoader, pkgCache, guard)
+	c.contextBuilder = lint.NewContextBuilder(c.cfg, pkgLoader, pkgCache, guard).
+		WithLifecycle(c.lifecycleRecorder)
+
+	if c.runnerFactory == nil {
+		c.runnerFactory = lint.NewRunnerFactory(c.log.Child(logutils.DebugKeyRunner), c.cfg,
+			c.goenv, c.lineCache, c.fileCache, c.dbManager)
+	}
 
 	if err = initHashSalt(c.log.Child(logutils.DebugKeyGoModSalt), c.buildInfo.Version, c.cfg); err != nil {
 		return fmt.Errorf("failed to init hash salt: %w", err)
@@ -247,10 +290,11 @@ func (c *runCommand) execute(_ *cobra.Command, _ []string) {
 		go watchResources(ctx, trackResourcesEndCh, c.log, c.debugf)
 	}
 
-	if err := c.runAndPrint(ctx); err != nil {
-		c.log.Errorf("Running error: %s", err)
+	runErr := c.runAndPrint(ctx)
+	if runErr != nil {
+		c.log.Errorf("Running error: %s", runErr)
 		if c.exitCode == exitcodes.Success {
-			if exitErr, ok := errors.AsType[*exitcodes.ExitError](err); ok {
+			if exitErr, ok := errors.AsType[*exitcodes.ExitError](runErr); ok {
 				c.exitCode = exitErr.Code
 			} else {
 				c.exitCode = exitcodes.Failure
@@ -259,6 +303,18 @@ func (c *runCommand) execute(_ *cobra.Command, _ []string) {
 	}
 
 	c.setupExitCode(ctx)
+	c.writeLifecycleReport(c.exitCode, runErr, ctx.Err())
+}
+
+func (c *runCommand) writeLifecycleReport(exitCode int, runErr, contextErr error) {
+	if c.lifecycleRecorder == nil {
+		return
+	}
+
+	c.lifecycleRecorder.Finish(exitCode, runErr, contextErr)
+	if err := c.lifecycleRecorder.Write(c.lifecycleReportPath); err != nil {
+		c.log.Warnf("Failed to write lifecycle report: %s", err)
+	}
 }
 
 func (c *runCommand) startTracing() error {
@@ -377,8 +433,7 @@ func (c *runCommand) runAnalysis(ctx context.Context) ([]*result.Issue, error) {
 		return nil, fmt.Errorf("context loading failed: %w", err)
 	}
 
-	runner, err := lint.NewRunner(c.log.Child(logutils.DebugKeyRunner), c.cfg,
-		c.goenv, c.lineCache, c.fileCache, c.dbManager, lintCtx)
+	runner, err := c.runnerFactory.Build(lintCtx)
 	if err != nil {
 		return nil, err
 	}

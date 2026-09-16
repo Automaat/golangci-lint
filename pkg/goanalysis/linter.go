@@ -62,6 +62,20 @@ func (lnt *Linter) Run(_ context.Context, lintCtx *linter.Context) ([]*result.Is
 	return runAnalyzers(lnt, lintCtx)
 }
 
+func (lnt *Linter) getLinterNames() []string {
+	return []string{lnt.name}
+}
+
+func (lnt *Linter) getLinterNameForAnalyzer(analyzer *analysis.Analyzer) string {
+	for _, candidate := range lnt.analyzers {
+		if candidate == analyzer {
+			return lnt.name
+		}
+	}
+
+	return ""
+}
+
 func (lnt *Linter) UseOriginalPackages() {
 	lnt.needUseOriginalPackages = true
 }
