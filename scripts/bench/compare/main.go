@@ -35,8 +35,14 @@ func run(args []string) error {
 	}
 
 	result, err := diagnostics.CompareFiles(
-		diagnostics.Input{Path: opts.ReferencePath, Root: opts.WorkloadRoot, ExitCode: opts.ReferenceExit},
-		diagnostics.Input{Path: opts.CandidatePath, Root: opts.WorkloadRoot, ExitCode: opts.CandidateExit},
+		diagnostics.Input{
+			Path: opts.ReferencePath, Root: opts.WorkloadRoot,
+			Outcome: &diagnostics.ProcessOutcome{ExitCode: opts.ReferenceExit},
+		},
+		diagnostics.Input{
+			Path: opts.CandidatePath, Root: opts.WorkloadRoot,
+			Outcome: &diagnostics.ProcessOutcome{ExitCode: opts.CandidateExit},
+		},
 		opts.OutputDir,
 	)
 	if err != nil {

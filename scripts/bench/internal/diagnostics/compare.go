@@ -18,25 +18,39 @@ import (
 )
 
 const (
-	schemaVersion   = 1
+	schemaVersion   = 2
 	privateDirMode  = 0o750
 	privateFileMode = 0o600
+	reportComplete  = "complete"
+	reportMissing   = "missing"
+	reportInvalid   = "invalid"
 )
 
 // Input identifies one captured diagnostic report.
 type Input struct {
 	Path          string
 	Root          string
-	ExitCode      int
+	Outcome       *ProcessOutcome
 	Changes       *changes.Set
 	ExpectedMatch *bool
 	WorktreePath  string
+}
+
+// ProcessOutcome describes how a captured process stopped.
+type ProcessOutcome struct {
+	ExitCode              int
+	TerminationReason     string
+	OptionalReport        bool
+	CancellationLatencyNS int64
+	SurvivingProcesses    int
 }
 
 // Summary records normalized comparison results.
 type Summary struct {
 	SchemaVersion          int    `json:"schema_version"`
 	Match                  bool   `json:"match"`
+	OutcomesMatch          bool   `json:"outcomes_match"`
+	DiagnosticsCompared    bool   `json:"diagnostics_compared"`
 	DiagnosticsMatch       bool   `json:"diagnostics_match"`
 	ExitCodesMatch         bool   `json:"exit_codes_match"`
 	ChangesCompared        bool   `json:"changes_compared"`
@@ -46,6 +60,14 @@ type Summary struct {
 	CandidateExpectedMatch bool   `json:"candidate_expected_match"`
 	ReferenceExit          int    `json:"reference_exit_code"`
 	CandidateExit          int    `json:"candidate_exit_code"`
+	ReferenceTermination   string `json:"reference_termination_reason,omitempty"`
+	CandidateTermination   string `json:"candidate_termination_reason,omitempty"`
+	ReferenceReportState   string `json:"reference_report_state"`
+	CandidateReportState   string `json:"candidate_report_state"`
+	ReferenceCancelNS      int64  `json:"reference_cancellation_latency_ns,omitempty"`
+	CandidateCancelNS      int64  `json:"candidate_cancellation_latency_ns,omitempty"`
+	ReferenceSurvivors     int    `json:"reference_surviving_processes"`
+	CandidateSurvivors     int    `json:"candidate_surviving_processes"`
 	ReferenceIssues        int    `json:"reference_issue_count"`
 	CandidateIssues        int    `json:"candidate_issue_count"`
 	ReferenceSHA256        string `json:"reference_sha256"`
@@ -61,6 +83,11 @@ type normalizedReport struct {
 	issueCount int
 }
 
+type capturedReport struct {
+	state  string
+	report normalizedReport
+}
+
 type changesComparison struct {
 	compared     bool
 	match        bool
@@ -74,58 +101,23 @@ type expectedComparison struct {
 	candidateMatch bool
 }
 
+type comparisonData struct {
+	referenceReport capturedReport
+	candidateReport capturedReport
+	changes         changesComparison
+	expected        expectedComparison
+}
+
 // CompareFiles normalizes and compares two captured diagnostic reports.
 func CompareFiles(reference, candidate Input, outputDir string) (Summary, error) {
 	if reference.Root == "" || candidate.Root == "" {
 		return Summary{}, errors.New("both workload roots are required")
 	}
-	referenceReport, err := loadNormalizedReport(reference, "reference")
+	data, err := loadComparisonData(&reference, &candidate, outputDir)
 	if err != nil {
 		return Summary{}, err
 	}
-	candidateReport, err := loadNormalizedReport(candidate, "candidate")
-	if err != nil {
-		return Summary{}, err
-	}
-
-	if writeErr := writeNormalizedReports(outputDir, referenceReport, candidateReport); writeErr != nil {
-		return Summary{}, writeErr
-	}
-	changeResult, err := compareChangeSets(reference, candidate, outputDir)
-	if err != nil {
-		return Summary{}, err
-	}
-	expectedResult, err := compareExpectedResults(reference, candidate)
-	if err != nil {
-		return Summary{}, err
-	}
-
-	diagnosticsMatch := bytes.Equal(referenceReport.data, candidateReport.data)
-	exitCodesMatch := reference.ExitCode == candidate.ExitCode
-	result := Summary{
-		SchemaVersion: schemaVersion,
-		Match: diagnosticsMatch && exitCodesMatch && changeResult.match &&
-			expectedResult.referenceMatch && expectedResult.candidateMatch,
-		DiagnosticsMatch:       diagnosticsMatch,
-		ExitCodesMatch:         exitCodesMatch,
-		ChangesCompared:        changeResult.compared,
-		ChangesMatch:           changeResult.match,
-		ExpectedCompared:       expectedResult.compared,
-		ReferenceExpectedMatch: expectedResult.referenceMatch,
-		CandidateExpectedMatch: expectedResult.candidateMatch,
-		ReferenceExit:          reference.ExitCode,
-		CandidateExit:          candidate.ExitCode,
-		ReferenceIssues:        referenceReport.issueCount,
-		CandidateIssues:        candidateReport.issueCount,
-		ReferenceSHA256:        sha256Hex(referenceReport.data),
-		CandidateSHA256:        sha256Hex(candidateReport.data),
-		ReferenceChangesSHA256: changeResult.referenceSHA,
-		CandidateChangesSHA256: changeResult.candidateSHA,
-	}
-	if !result.Match {
-		result.ReferenceWorktree = reference.WorktreePath
-		result.CandidateWorktree = candidate.WorktreePath
-	}
+	result := newSummary(&reference, &candidate, &data)
 	if writeErr := writeJSON(filepath.Join(outputDir, "summary.json"), result); writeErr != nil {
 		return Summary{}, writeErr
 	}
@@ -136,31 +128,132 @@ func CompareFiles(reference, candidate Input, outputDir string) (Summary, error)
 	return result, nil
 }
 
-func loadNormalizedReport(input Input, label string) (normalizedReport, error) {
+func loadComparisonData(reference, candidate *Input, outputDir string) (comparisonData, error) {
+	referenceReport, err := captureReport(reference, "reference")
+	if err != nil {
+		return comparisonData{}, err
+	}
+	candidateReport, err := captureReport(candidate, "candidate")
+	if err != nil {
+		return comparisonData{}, err
+	}
+	if writeErr := writeNormalizedReports(outputDir, referenceReport, candidateReport); writeErr != nil {
+		return comparisonData{}, writeErr
+	}
+	changeResult, err := compareChangeSets(reference, candidate, outputDir)
+	if err != nil {
+		return comparisonData{}, err
+	}
+	expectedResult, err := compareExpectedResults(reference, candidate)
+	if err != nil {
+		return comparisonData{}, err
+	}
+
+	return comparisonData{
+		referenceReport: referenceReport,
+		candidateReport: candidateReport,
+		changes:         changeResult,
+		expected:        expectedResult,
+	}, nil
+}
+
+func newSummary(reference, candidate *Input, data *comparisonData) Summary {
+	referenceOutcome := processOutcome(reference)
+	candidateOutcome := processOutcome(candidate)
+	diagnosticsCompared := data.referenceReport.state == reportComplete &&
+		data.candidateReport.state == reportComplete
+	diagnosticsMatch := data.referenceReport.state == data.candidateReport.state &&
+		data.referenceReport.state != reportInvalid
+	if diagnosticsCompared {
+		diagnosticsMatch = bytes.Equal(data.referenceReport.report.data, data.candidateReport.report.data)
+	}
+	exitCodesMatch := referenceOutcome.ExitCode == candidateOutcome.ExitCode
+	outcomesMatch := exitCodesMatch &&
+		referenceOutcome.TerminationReason == candidateOutcome.TerminationReason &&
+		referenceOutcome.SurvivingProcesses == 0 && candidateOutcome.SurvivingProcesses == 0
+	result := Summary{
+		SchemaVersion: schemaVersion,
+		Match: diagnosticsMatch && outcomesMatch && data.changes.match &&
+			data.expected.referenceMatch && data.expected.candidateMatch,
+		OutcomesMatch:          outcomesMatch,
+		DiagnosticsCompared:    diagnosticsCompared,
+		DiagnosticsMatch:       diagnosticsMatch,
+		ExitCodesMatch:         exitCodesMatch,
+		ChangesCompared:        data.changes.compared,
+		ChangesMatch:           data.changes.match,
+		ExpectedCompared:       data.expected.compared,
+		ReferenceExpectedMatch: data.expected.referenceMatch,
+		CandidateExpectedMatch: data.expected.candidateMatch,
+		ReferenceExit:          referenceOutcome.ExitCode,
+		CandidateExit:          candidateOutcome.ExitCode,
+		ReferenceTermination:   referenceOutcome.TerminationReason,
+		CandidateTermination:   candidateOutcome.TerminationReason,
+		ReferenceReportState:   data.referenceReport.state,
+		CandidateReportState:   data.candidateReport.state,
+		ReferenceCancelNS:      referenceOutcome.CancellationLatencyNS,
+		CandidateCancelNS:      candidateOutcome.CancellationLatencyNS,
+		ReferenceSurvivors:     referenceOutcome.SurvivingProcesses,
+		CandidateSurvivors:     candidateOutcome.SurvivingProcesses,
+		ReferenceIssues:        data.referenceReport.report.issueCount,
+		CandidateIssues:        data.candidateReport.report.issueCount,
+		ReferenceSHA256:        sha256Hex(data.referenceReport.report.data),
+		CandidateSHA256:        sha256Hex(data.candidateReport.report.data),
+		ReferenceChangesSHA256: data.changes.referenceSHA,
+		CandidateChangesSHA256: data.changes.candidateSHA,
+	}
+	if !result.Match {
+		result.ReferenceWorktree = reference.WorktreePath
+		result.CandidateWorktree = candidate.WorktreePath
+	}
+
+	return result
+}
+
+func captureReport(input *Input, label string) (capturedReport, error) {
+	outcome := processOutcome(input)
 	data, err := os.ReadFile(input.Path)
 	if err != nil {
-		return normalizedReport{}, fmt.Errorf("read %s output: %w", label, err)
+		if outcome.OptionalReport && errors.Is(err, os.ErrNotExist) {
+			return capturedReport{state: reportMissing}, nil
+		}
+		return capturedReport{}, fmt.Errorf("read %s output: %w", label, err)
 	}
 	report, err := normalizeReportData(data, input.Root)
 	if err != nil {
-		return normalizedReport{}, fmt.Errorf("normalize %s output: %w", label, err)
+		if outcome.OptionalReport {
+			return capturedReport{state: reportInvalid}, nil
+		}
+		return capturedReport{}, fmt.Errorf("normalize %s output: %w", label, err)
 	}
 
-	return report, nil
+	return capturedReport{state: reportComplete, report: report}, nil
 }
 
-func writeNormalizedReports(outputDir string, reference, candidate normalizedReport) error {
+func processOutcome(input *Input) ProcessOutcome {
+	if input.Outcome == nil {
+		return ProcessOutcome{}
+	}
+
+	return *input.Outcome
+}
+
+func writeNormalizedReports(outputDir string, reference, candidate capturedReport) error {
 	if err := prepareOutputDir(outputDir); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(outputDir, "reference.normalized.json"), reference.data); err != nil {
-		return err
+	if reference.state == reportComplete {
+		if err := writeFile(filepath.Join(outputDir, "reference.normalized.json"), reference.report.data); err != nil {
+			return err
+		}
+	}
+	if candidate.state == reportComplete {
+		return writeFile(filepath.Join(outputDir, "candidate.normalized.json"), candidate.report.data)
 	}
 
-	return writeFile(filepath.Join(outputDir, "candidate.normalized.json"), candidate.data)
+	return nil
 }
 
-func compareChangeSets(reference, candidate Input, outputDir string) (changesComparison, error) {
+func compareChangeSets(reference, candidate *Input, outputDir string) (changesComparison, error) {
 	result := changesComparison{
 		compared: reference.Changes != nil || candidate.Changes != nil,
 		match:    true,
@@ -194,7 +287,7 @@ func compareChangeSets(reference, candidate Input, outputDir string) (changesCom
 	return result, nil
 }
 
-func compareExpectedResults(reference, candidate Input) (expectedComparison, error) {
+func compareExpectedResults(reference, candidate *Input) (expectedComparison, error) {
 	result := expectedComparison{
 		compared:       reference.ExpectedMatch != nil || candidate.ExpectedMatch != nil,
 		referenceMatch: true,
