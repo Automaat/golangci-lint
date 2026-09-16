@@ -20,6 +20,7 @@ func TestRecorderSnapshot(t *testing.T) {
 	recorder.RecordAnalysis(&AnalysisRun{
 		Name:          "goanalysis_metalinter",
 		RequestedPkgs: 3,
+		Scheduler:     &SchedulerRun{RootActions: 4},
 		ConfiguredLinters: []ConfiguredLinterRun{
 			{Name: "govet", Issues: 1},
 		},
@@ -35,6 +36,7 @@ func TestRecorderSnapshot(t *testing.T) {
 	report.PackageLoad.OriginalPackages = 99
 	report.Analysis[0].ConfiguredLinters[0].Name = "changed"
 	report.Analysis[0].Analyzers[0].Name = "changed"
+	report.Analysis[0].Scheduler.RootActions = 99
 
 	assert.Equal(t, SchemaVersion, report.SchemaVersion)
 	assert.GreaterOrEqual(t, report.ElapsedNS, int64(0))
@@ -49,6 +51,7 @@ func TestRecorderSnapshot(t *testing.T) {
 	assert.Equal(t, 4, unchanged.PackageLoad.OriginalPackages)
 	assert.Equal(t, "govet", unchanged.Analysis[0].ConfiguredLinters[0].Name)
 	assert.Equal(t, "printf", unchanged.Analysis[0].Analyzers[0].Name)
+	assert.Equal(t, 4, unchanged.Analysis[0].Scheduler.RootActions)
 }
 
 func TestRecorderConcurrent(t *testing.T) {

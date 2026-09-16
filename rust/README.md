@@ -59,7 +59,9 @@ The Go child can independently emit detailed phase metrics by setting
 variable through unchanged. Its versioned report covers package loading,
 analysis graph size and cache use, each optimized linter invocation, each
 configured Go-analysis linter and analyzer, result processing, and the final Go
-exit state. Report-write failures warn without changing the Go exit code.
+exit state. The analysis scheduler section records DAG edges, source/export
+loads, peak package/action concurrency, and dependency wait time. Report-write
+failures warn without changing the Go exit code.
 
 Normal child exits are preserved. Supervisor-owned exits are `124` for timeout,
 `125` for RSS limit, `126` for supervisor failure, `127` for child startup

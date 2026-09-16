@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/tools/go/gcexportdata"
@@ -39,6 +40,7 @@ type loadingPackage struct {
 	dependents  int32 // number of depending on it packages
 	analyzeOnce sync.Once
 	decUseMutex sync.Mutex
+	scheduler   *schedulerMetrics
 }
 
 func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.CancelFunc, loadMode LoadMode, loadSem chan struct{}) {
@@ -52,7 +54,13 @@ func (lp *loadingPackage) analyzeRecursive(ctx context.Context, cancel context.C
 			})
 		}
 
-		wg.Wait()
+		if lp.scheduler == nil || len(lp.imports) == 0 {
+			wg.Wait()
+		} else {
+			waitStarted := time.Now()
+			wg.Wait()
+			lp.scheduler.addPackageDependencyWait(time.Since(waitStarted))
+		}
 
 		lp.analyze(ctx, cancel, loadMode, loadSem)
 	})
@@ -63,7 +71,9 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 	case <-ctx.Done():
 		return
 	case loadSem <- struct{}{}:
+		lp.scheduler.packageWorkerStarted()
 		defer func() {
+			lp.scheduler.packageWorkerFinished()
 			<-loadSem
 		}()
 	}
@@ -95,8 +105,11 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 	actsWg, ctxGroup := errgroup.WithContext(ctx)
 
 	for _, act := range lp.actions {
+		lp.scheduler.actionGoroutineStarted()
 		actsWg.Go(func() error {
-			act.waitUntilDependingAnalyzersWorked(ctxGroup)
+			defer lp.scheduler.actionGoroutineFinished()
+
+			lp.scheduler.addAnalyzerDependencyWait(act.waitUntilDependingAnalyzersWorked(ctxGroup))
 
 			select {
 			case <-ctxGroup.Done():
@@ -104,6 +117,8 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 			default:
 			}
 
+			lp.scheduler.actionExecutionStarted()
+			defer lp.scheduler.actionExecutionFinished()
 			act.analyzeSafe()
 
 			return act.Err
@@ -117,6 +132,8 @@ func (lp *loadingPackage) analyze(ctx context.Context, cancel context.CancelFunc
 }
 
 func (lp *loadingPackage) loadFromSource(loadMode LoadMode) error {
+	lp.scheduler.sourceLoaded()
+
 	pkg := lp.pkg
 
 	// Many packages have few files, much fewer than there
@@ -222,6 +239,8 @@ func (lp *loadingPackage) loadFromSource(loadMode LoadMode) error {
 }
 
 func (lp *loadingPackage) loadFromExportData() error {
+	lp.scheduler.exportLoaded()
+
 	pkg := lp.pkg
 
 	// Call NewPackage directly with explicit name.

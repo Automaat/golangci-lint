@@ -58,3 +58,40 @@ func TestAnalysisLifecycleRecordsPanic(t *testing.T) {
 	require.Len(t, report.Analysis, 1)
 	assert.Equal(t, "boom", report.Analysis[0].Error)
 }
+
+func TestAnalysisLifecycleRecordsSchedulerStats(t *testing.T) {
+	recorder := lifecycle.NewRecorder()
+	metrics := &analysisLifecycle{
+		recorder: recorder,
+		report:   &lifecycle.AnalysisRun{},
+	}
+
+	metrics.recordStats(&analysisStats{
+		scheduler: schedulerStats{
+			rootActions:            3,
+			horizontalEdges:        4,
+			verticalEdges:          5,
+			sourceActions:          6,
+			sourceLoads:            7,
+			exportLoads:            8,
+			peakPackageWorkers:     2,
+			peakActionGoroutines:   9,
+			peakExecutingActions:   2,
+			packageDependencyWait:  10 * time.Millisecond,
+			analyzerDependencyWait: 11 * time.Millisecond,
+		},
+	})
+
+	require.NotNil(t, metrics.report.Scheduler)
+	assert.Equal(t, 3, metrics.report.Scheduler.RootActions)
+	assert.Equal(t, 4, metrics.report.Scheduler.HorizontalEdges)
+	assert.Equal(t, 5, metrics.report.Scheduler.VerticalEdges)
+	assert.Equal(t, 6, metrics.report.Scheduler.SourceActions)
+	assert.Equal(t, 7, metrics.report.Scheduler.SourceLoads)
+	assert.Equal(t, 8, metrics.report.Scheduler.ExportLoads)
+	assert.Equal(t, 2, metrics.report.Scheduler.PeakPackageWorkers)
+	assert.Equal(t, 9, metrics.report.Scheduler.PeakActionGoroutines)
+	assert.Equal(t, 2, metrics.report.Scheduler.PeakExecutingActions)
+	assert.Equal(t, int64(10*time.Millisecond), metrics.report.Scheduler.PackageDependencyWaitNS)
+	assert.Equal(t, int64(11*time.Millisecond), metrics.report.Scheduler.AnalyzerDependencyWaitNS)
+}

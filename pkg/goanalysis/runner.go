@@ -57,6 +57,7 @@ type runner struct {
 	passToPkgGuard sync.Mutex
 	sw             *timeutils.Stopwatch
 	collectStats   bool
+	scheduler      *schedulerMetrics
 }
 
 type analyzerStats struct {
@@ -74,12 +75,13 @@ type analysisStats struct {
 	actions         int
 	parallelism     int
 	analyzers       []analyzerStats
+	scheduler       schedulerStats
 }
 
 func newRunner(prefix string, logger logutils.Log, pkgCache *cache.Cache, loadGuard *load.Guard,
 	loadMode LoadMode, sw *timeutils.Stopwatch, collectStats bool,
 ) *runner {
-	return &runner{
+	r := &runner{
 		prefix:       prefix,
 		log:          logger,
 		pkgCache:     pkgCache,
@@ -89,6 +91,11 @@ func newRunner(prefix string, logger logutils.Log, pkgCache *cache.Cache, loadGu
 		sw:           sw,
 		collectStats: collectStats,
 	}
+	if collectStats {
+		r.scheduler = &schedulerMetrics{}
+	}
+
+	return r
 }
 
 // Run loads the packages specified by args using go/packages,
@@ -98,14 +105,14 @@ func newRunner(prefix string, logger logutils.Log, pkgCache *cache.Cache, loadGu
 // singlechecker and the multi-analysis commands.
 // It returns the appropriate exit code.
 func (r *runner) run(analyzers []*analysis.Analyzer, initialPackages []*packages.Package,
-	statsReady func(analysisStats),
+	statsReady func(*analysisStats),
 ) ([]*Diagnostic, []error, map[*analysis.Pass]*packages.Package,
 ) {
 	debugf("Analyzing %d packages on load mode %s", len(initialPackages), r.loadMode)
 
 	roots, stats := r.analyze(initialPackages, analyzers)
 	if statsReady != nil {
-		statsReady(stats)
+		statsReady(&stats)
 	}
 
 	diags, errs := extractDiagnostics(roots)
@@ -243,6 +250,10 @@ func (r *runner) prepareAnalysis(pkgs []*packages.Package,
 
 func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyzer) ([]*action, analysisStats) {
 	initialPkgs, actions, rootActions := r.prepareAnalysis(pkgs, analyzers)
+	var scheduler schedulerStats
+	if r.scheduler != nil {
+		scheduler = collectSchedulerGraphStats(actions, rootActions)
+	}
 
 	actionPerPkg := map[*packages.Package][]*action{}
 	for _, act := range actions {
@@ -273,6 +284,7 @@ func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyze
 			actions:    actionPerPkg[pkg],
 			loadGuard:  r.loadGuard,
 			dependents: 1, // self dependent
+			scheduler:  r.scheduler,
 		}
 	}
 	for _, act := range actions {
@@ -307,8 +319,10 @@ func (r *runner) analyze(pkgs []*packages.Package, analyzers []*analysis.Analyze
 		totalPackages:   len(loadingPackages),
 		actions:         len(actions),
 		parallelism:     gomaxprocs,
+		scheduler:       scheduler,
 	}
 	if r.collectStats {
+		r.scheduler.finish(&stats.scheduler, actions)
 		stats.analyzers = collectAnalyzerStats(actions)
 	}
 
