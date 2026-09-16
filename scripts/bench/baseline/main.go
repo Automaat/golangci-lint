@@ -25,21 +25,26 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
 
+	"github.com/golangci/golangci-lint/v2/scripts/bench/internal/changes"
 	"github.com/golangci/golangci-lint/v2/scripts/bench/internal/diagnostics"
 )
 
 const (
-	schemaVersion             = 1
-	defaultProfileConcurrency = 4
-	fullCommitSHALength       = 40
-	privateFileMode           = 0o600
-	privateDirMode            = 0o750
-	bytesPerMiB               = 1024 * 1024
-	rssSampleInterval         = 5 * time.Millisecond
-	defaultRunTimeout         = 5 * time.Minute
-	defaultMaxRSSMiB          = 2048
-	defaultGoMaxProcs         = 2
-	defaultNice               = 10
+	schemaVersion               = 1
+	defaultProfileConcurrency   = 4
+	fullCommitSHALength         = 40
+	privateFileMode             = 0o600
+	privateDirMode              = 0o750
+	bytesPerMiB                 = 1024 * 1024
+	rssSampleInterval           = 5 * time.Millisecond
+	compatibilityCleanupTimeout = 30 * time.Second
+	defaultRunTimeout           = 5 * time.Minute
+	defaultMaxRSSMiB            = 2048
+	defaultGoMaxProcs           = 2
+	defaultNice                 = 10
+	parentDirectory             = ".."
+	forkLabel                   = "fork"
+	upstreamLabel               = "upstream"
 )
 
 type manifest struct {
@@ -64,11 +69,13 @@ type workload struct {
 }
 
 type scenario struct {
-	Name      string   `json:"name"`
-	UseConfig bool     `json:"use_config,omitempty"`
-	WorkDir   string   `json:"work_dir,omitempty"`
-	Packages  []string `json:"packages,omitempty"`
-	Args      []string `json:"args,omitempty"`
+	Name          string            `json:"name"`
+	UseConfig     bool              `json:"use_config,omitempty"`
+	WorkDir       string            `json:"work_dir,omitempty"`
+	Packages      []string          `json:"packages,omitempty"`
+	Args          []string          `json:"args,omitempty"`
+	Mutates       bool              `json:"mutates,omitempty"`
+	ExpectedFiles map[string]string `json:"expected_files,omitempty"`
 }
 
 type options struct {
@@ -511,20 +518,65 @@ func validateScenarios(scenarios []scenario) error {
 		if err := validateName("scenario", item.Name, names); err != nil {
 			return err
 		}
-		if item.UseConfig && slices.Contains(item.Args, "--no-config") {
-			return fmt.Errorf("scenario %q cannot use config and --no-config", item.Name)
+		if err := validateScenario(item); err != nil {
+			return err
 		}
-		if filepath.IsAbs(item.WorkDir) {
-			return fmt.Errorf("scenario %q working directory must be relative", item.Name)
+	}
+
+	return nil
+}
+
+func validateScenario(item *scenario) error {
+	if item.UseConfig && slices.Contains(item.Args, "--no-config") {
+		return fmt.Errorf("scenario %q cannot use config and --no-config", item.Name)
+	}
+	if slices.ContainsFunc(item.Args, func(value string) bool {
+		return value == "--fix" || strings.HasPrefix(value, "--fix=")
+	}) {
+		return fmt.Errorf("scenario %q must use mutates instead of a fix argument", item.Name)
+	}
+	if filepath.IsAbs(item.WorkDir) {
+		return fmt.Errorf("scenario %q working directory must be relative", item.Name)
+	}
+	if item.WorkDir == parentDirectory ||
+		strings.HasPrefix(filepath.Clean(item.WorkDir), parentDirectory+string(filepath.Separator)) {
+		return fmt.Errorf("scenario %q working directory escapes the workload target", item.Name)
+	}
+	for _, pkg := range item.Packages {
+		if strings.TrimSpace(pkg) == "" {
+			return fmt.Errorf("scenario %q packages cannot contain an empty value", item.Name)
 		}
-		if item.WorkDir == ".." || strings.HasPrefix(filepath.Clean(item.WorkDir), ".."+string(filepath.Separator)) {
-			return fmt.Errorf("scenario %q working directory escapes the workload target", item.Name)
+	}
+	if len(item.ExpectedFiles) > 0 && !item.Mutates {
+		return fmt.Errorf("scenario %q expected_files requires mutates", item.Name)
+	}
+
+	return validateExpectedFiles(item)
+}
+
+func validateExpectedFiles(item *scenario) error {
+	for actual, expected := range item.ExpectedFiles {
+		if err := validateRelativePath(actual); err != nil {
+			return fmt.Errorf("scenario %q expected file %q: %w", item.Name, actual, err)
 		}
-		for _, pkg := range item.Packages {
-			if strings.TrimSpace(pkg) == "" {
-				return fmt.Errorf("scenario %q packages cannot contain an empty value", item.Name)
-			}
+		if err := validateRelativePath(expected); err != nil {
+			return fmt.Errorf("scenario %q golden file %q: %w", item.Name, expected, err)
 		}
+	}
+
+	return nil
+}
+
+func validateRelativePath(path string) error {
+	if path == "" {
+		return errors.New("path cannot be empty")
+	}
+	if filepath.IsAbs(path) {
+		return errors.New("path must be relative")
+	}
+	clean := filepath.Clean(path)
+	if clean == parentDirectory || strings.HasPrefix(clean, parentDirectory+string(filepath.Separator)) {
+		return errors.New("path escapes the workload root")
 	}
 
 	return nil
@@ -583,7 +635,7 @@ func parseCacheModes(raw string) ([]string, error) {
 
 func prepareBinaries(opts *options) ([]binary, error) {
 	var binaries []binary
-	for _, item := range []binary{{Label: "fork", Path: opts.ForkBin}, {Label: "upstream", Path: opts.UpstreamBin}} {
+	for _, item := range []binary{{Label: forkLabel, Path: opts.ForkBin}, {Label: upstreamLabel, Path: opts.UpstreamBin}} {
 		if item.Path == "" {
 			continue
 		}
@@ -786,7 +838,7 @@ func safeJoin(root, relative string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve path: %w", err)
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if rel == parentDirectory || strings.HasPrefix(rel, parentDirectory+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes workload root: %s", relative)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -962,8 +1014,14 @@ func (r *runner) runCompatibility(concurrency []int) error {
 			for scenarioIndex := range r.scenarios {
 				scenario := &r.scenarios[scenarioIndex]
 				for _, value := range concurrency {
+					if scenario.Mutates {
+						if err := r.runMutationCompatibility(binaries, workload, target, scenario, value); err != nil {
+							return err
+						}
+						continue
+					}
 					inputs := make(map[string]diagnostics.Input, len(binaries))
-					for _, label := range []string{"upstream", "fork"} {
+					for _, label := range []string{upstreamLabel, forkLabel} {
 						bin := binaries[label]
 						base := artifactBase(bin, workload, target, scenario, value, 1, "cold", "compatibility")
 						artifact := filepath.Join(r.outDir, "compat", "raw", base+".json")
@@ -975,13 +1033,15 @@ func (r *runner) runCompatibility(concurrency []int) error {
 						if err != nil {
 							return err
 						}
-						inputs[label] = diagnostics.Input{Path: artifact, ExitCode: stats.exitCode}
+						inputs[label] = diagnostics.Input{
+							Path: artifact, Root: workload.Root, ExitCode: stats.exitCode,
+						}
 					}
 
 					caseName := compatibilityCaseBase(workload, target, scenario, value)
 					outputDir := filepath.Join(r.outDir, "compat", caseName)
 					summary, err := diagnostics.CompareFiles(
-						inputs["upstream"], inputs["fork"], workload.Root, outputDir,
+						inputs[upstreamLabel], inputs[forkLabel], outputDir,
 					)
 					if err != nil {
 						return fmt.Errorf("compare %s: %w", caseName, err)
@@ -996,6 +1056,240 @@ func (r *runner) runCompatibility(concurrency []int) error {
 	}
 
 	return nil
+}
+
+func (r *runner) runMutationCompatibility(
+	binaries map[string]binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+) (runErr error) {
+	caseName := compatibilityCaseBase(workload, target, scenario, concurrency)
+	worktrees, created, baseline, err := r.prepareMutationWorktrees(workload, caseName)
+	if err != nil {
+		return err
+	}
+	retain := false
+	defer func() {
+		if !retain {
+			runErr = errors.Join(runErr, r.removeCompatibilityWorktrees(workload.Root, created))
+		}
+	}()
+
+	expectedContent, err := loadExpectedFiles(worktrees[upstreamLabel].Root, scenario.ExpectedFiles)
+	if err != nil {
+		return err
+	}
+
+	inputs := make(map[string]diagnostics.Input, len(binaries))
+	for _, label := range []string{upstreamLabel, forkLabel} {
+		input, inputErr := r.runMutationBinary(
+			binaries[label], worktrees[label], target, scenario, concurrency, baseline, expectedContent,
+		)
+		if inputErr != nil {
+			return inputErr
+		}
+		inputs[label] = input
+	}
+
+	outputDir := filepath.Join(r.outDir, "compat", caseName)
+	summary, err := diagnostics.CompareFiles(inputs[upstreamLabel], inputs[forkLabel], outputDir)
+	if err != nil {
+		if summary.SchemaVersion != 0 && !summary.Match {
+			retain = true
+		}
+		return fmt.Errorf("compare %s: %w", caseName, err)
+	}
+	_, _ = fmt.Fprintf(
+		os.Stdout, "compatibility %s: %d issues, exit code %d, %d file changes\n",
+		caseName, summary.ReferenceIssues, summary.ReferenceExit, len(inputs[upstreamLabel].Changes.Changes),
+	)
+
+	return nil
+}
+
+func (r *runner) prepareMutationWorktrees(
+	workload *preparedWorkload,
+	caseName string,
+) (_ map[string]*preparedWorkload, _ []*preparedWorkload, _ changes.Snapshot, runErr error) {
+	worktrees := make(map[string]*preparedWorkload, 2)
+	var created []*preparedWorkload
+	defer func() {
+		if runErr != nil {
+			runErr = errors.Join(runErr, r.removeCompatibilityWorktrees(workload.Root, created))
+		}
+	}()
+
+	var baseline changes.Snapshot
+	for _, label := range []string{upstreamLabel, forkLabel} {
+		isolated, err := r.createCompatibilityWorktree(workload, caseName, label)
+		if err != nil {
+			return nil, nil, changes.Snapshot{}, err
+		}
+		created = append(created, isolated)
+		worktrees[label] = isolated
+
+		snapshot, err := changes.Capture(isolated.Root)
+		if err != nil {
+			return nil, nil, changes.Snapshot{}, err
+		}
+		if label == upstreamLabel {
+			baseline = snapshot
+		} else if !changes.Equal(baseline, snapshot) {
+			return nil, nil, changes.Snapshot{},
+				fmt.Errorf("compatibility worktrees for %s do not start identically", caseName)
+		}
+	}
+
+	return worktrees, created, baseline, nil
+}
+
+func (r *runner) runMutationBinary(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+	baseline changes.Snapshot,
+	expectedContent map[string][]byte,
+) (diagnostics.Input, error) {
+	base := artifactBase(bin, workload, target, scenario, concurrency, 1, "cold", "compatibility")
+	artifact := filepath.Join(r.outDir, "compat", "raw", base+".json")
+	cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, "compatibility")
+	stats, err := r.execute(
+		bin, workload, target, scenario, concurrency, 1, "cold", "compatibility", cacheDir, artifact,
+		compatibilityOutputArgs(artifact)...,
+	)
+	if err != nil {
+		return diagnostics.Input{}, err
+	}
+
+	after, err := changes.Capture(workload.Root)
+	if err != nil {
+		return diagnostics.Input{}, err
+	}
+	changeSet := changes.Diff(baseline, after)
+	input := diagnostics.Input{
+		Path: artifact, Root: workload.Root, ExitCode: stats.exitCode,
+		Changes: &changeSet, WorktreePath: workload.Root,
+	}
+	if len(scenario.ExpectedFiles) > 0 {
+		expectedMatch, matchErr := expectedFilesMatch(workload.Root, expectedContent)
+		if matchErr != nil {
+			return diagnostics.Input{}, matchErr
+		}
+		input.ExpectedMatch = &expectedMatch
+	}
+
+	return input, nil
+}
+
+func (r *runner) createCompatibilityWorktree(
+	workload *preparedWorkload,
+	caseName string,
+	label string,
+) (*preparedWorkload, error) {
+	root := filepath.Join(r.outDir, "compat", "worktrees", caseName, label)
+	if err := os.MkdirAll(filepath.Dir(root), privateDirMode); err != nil {
+		return nil, fmt.Errorf("create compatibility worktree parent: %w", err)
+	}
+	if _, err := commandOutput(
+		r.ctx, "git", "-C", workload.Root, "worktree", "add", "--detach", root, workload.Revision,
+	); err != nil {
+		return nil, fmt.Errorf("create %s compatibility worktree: %w", label, err)
+	}
+
+	isolated := *workload
+	isolated.Root = root
+	isolated.Dirty = false
+	configPath, configHash, err := resolveConfig(root, workload.Config)
+	if err != nil {
+		cleanupErr := r.removeCompatibilityWorktree(workload.Root, root)
+		return nil, errors.Join(err, cleanupErr)
+	}
+	isolated.ConfigPath = configPath
+	isolated.ConfigHash = configHash
+
+	commit, err := commandOutput(r.ctx, "git", "-C", root, "rev-parse", "HEAD")
+	if err != nil {
+		cleanupErr := r.removeCompatibilityWorktree(workload.Root, root)
+		return nil, errors.Join(err, cleanupErr)
+	}
+	if commit != workload.Revision {
+		cleanupErr := r.removeCompatibilityWorktree(workload.Root, root)
+		return nil, errors.Join(
+			fmt.Errorf("compatibility worktree is at %s, expected %s", commit, workload.Revision), cleanupErr,
+		)
+	}
+	dirty, err := isWorkloadDirty(r.ctx, root)
+	if err != nil || dirty {
+		cleanupErr := r.removeCompatibilityWorktree(workload.Root, root)
+		if err != nil {
+			return nil, errors.Join(err, cleanupErr)
+		}
+		return nil, errors.Join(fmt.Errorf("compatibility worktree is dirty: %s", root), cleanupErr)
+	}
+
+	return &isolated, nil
+}
+
+func (r *runner) removeCompatibilityWorktree(repository, worktree string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), compatibilityCleanupTimeout)
+	defer cancel()
+	_, err := commandOutput(cleanupCtx, "git", "-C", repository, "worktree", "remove", "--force", worktree)
+	if err != nil {
+		return fmt.Errorf("remove compatibility worktree %s: %w", worktree, err)
+	}
+
+	return nil
+}
+
+func (r *runner) removeCompatibilityWorktrees(repository string, worktrees []*preparedWorkload) error {
+	var result error
+	for i := len(worktrees) - 1; i >= 0; i-- {
+		result = errors.Join(result, r.removeCompatibilityWorktree(repository, worktrees[i].Root))
+	}
+
+	return result
+}
+
+func loadExpectedFiles(root string, expectedFiles map[string]string) (map[string][]byte, error) {
+	result := make(map[string][]byte, len(expectedFiles))
+	for actual, expected := range expectedFiles {
+		expectedPath, err := safeJoin(root, expected)
+		if err != nil {
+			return nil, fmt.Errorf("resolve expected file %s: %w", expected, err)
+		}
+		expectedData, err := os.ReadFile(expectedPath)
+		if err != nil {
+			return nil, fmt.Errorf("read expected file %s: %w", expected, err)
+		}
+		result[actual] = expectedData
+	}
+
+	return result, nil
+}
+
+func expectedFilesMatch(actualRoot string, expectedFiles map[string][]byte) (bool, error) {
+	for actual, expectedData := range expectedFiles {
+		if err := validateRelativePath(actual); err != nil {
+			return false, fmt.Errorf("resolve fixed file %s: %w", actual, err)
+		}
+		actualPath := filepath.Join(actualRoot, filepath.Clean(actual))
+		actualData, err := os.ReadFile(actualPath)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("read fixed file %s: %w", actual, err)
+		}
+		if !bytes.Equal(actualData, expectedData) {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }
 
 func compatibilityOutputArgs(artifact string) []string {
@@ -1234,7 +1528,7 @@ func buildRunArgs(
 		"-v",
 		"--timeout=" + runTimeout.String(),
 		"--allow-serial-runners",
-		"--fix=false",
+		fmt.Sprintf("--fix=%t", scenario.Mutates),
 		fmt.Sprintf("--concurrency=%d", concurrency),
 	}
 	if !slices.ContainsFunc(extra, func(value string) bool {

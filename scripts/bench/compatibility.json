@@ -33,6 +33,20 @@
       ]
     },
     {
+      "name": "fix-mode",
+      "work_dir": "test",
+      "packages": ["testdata/fix/in/multiple-issues-fix.go"],
+      "args": [
+        "--default=none",
+        "-Emisspell",
+        "--config=testdata/configs/multiple-issues-fix.yml"
+      ],
+      "mutates": true,
+      "expected_files": {
+        "test/testdata/fix/in/multiple-issues-fix.go": "test/testdata/fix/out/multiple-issues-fix.go"
+      }
+    },
+    {
       "name": "compile-error",
       "work_dir": "test",
       "packages": ["testdata/notcompiles/typecheck.go"],

@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/golangci/golangci-lint/v2/scripts/bench/internal/changes"
 )
 
 const (
@@ -23,22 +25,35 @@ const (
 
 // Input identifies one captured diagnostic report.
 type Input struct {
-	Path     string
-	ExitCode int
+	Path          string
+	Root          string
+	ExitCode      int
+	Changes       *changes.Set
+	ExpectedMatch *bool
+	WorktreePath  string
 }
 
 // Summary records normalized comparison results.
 type Summary struct {
-	SchemaVersion    int    `json:"schema_version"`
-	Match            bool   `json:"match"`
-	DiagnosticsMatch bool   `json:"diagnostics_match"`
-	ExitCodesMatch   bool   `json:"exit_codes_match"`
-	ReferenceExit    int    `json:"reference_exit_code"`
-	CandidateExit    int    `json:"candidate_exit_code"`
-	ReferenceIssues  int    `json:"reference_issue_count"`
-	CandidateIssues  int    `json:"candidate_issue_count"`
-	ReferenceSHA256  string `json:"reference_sha256"`
-	CandidateSHA256  string `json:"candidate_sha256"`
+	SchemaVersion          int    `json:"schema_version"`
+	Match                  bool   `json:"match"`
+	DiagnosticsMatch       bool   `json:"diagnostics_match"`
+	ExitCodesMatch         bool   `json:"exit_codes_match"`
+	ChangesCompared        bool   `json:"changes_compared"`
+	ChangesMatch           bool   `json:"changes_match"`
+	ExpectedCompared       bool   `json:"expected_compared"`
+	ReferenceExpectedMatch bool   `json:"reference_expected_match"`
+	CandidateExpectedMatch bool   `json:"candidate_expected_match"`
+	ReferenceExit          int    `json:"reference_exit_code"`
+	CandidateExit          int    `json:"candidate_exit_code"`
+	ReferenceIssues        int    `json:"reference_issue_count"`
+	CandidateIssues        int    `json:"candidate_issue_count"`
+	ReferenceSHA256        string `json:"reference_sha256"`
+	CandidateSHA256        string `json:"candidate_sha256"`
+	ReferenceChangesSHA256 string `json:"reference_changes_sha256,omitempty"`
+	CandidateChangesSHA256 string `json:"candidate_changes_sha256,omitempty"`
+	ReferenceWorktree      string `json:"reference_worktree,omitempty"`
+	CandidateWorktree      string `json:"candidate_worktree,omitempty"`
 }
 
 type normalizedReport struct {
@@ -46,56 +61,153 @@ type normalizedReport struct {
 	issueCount int
 }
 
+type changesComparison struct {
+	compared     bool
+	match        bool
+	referenceSHA string
+	candidateSHA string
+}
+
+type expectedComparison struct {
+	compared       bool
+	referenceMatch bool
+	candidateMatch bool
+}
+
 // CompareFiles normalizes and compares two captured diagnostic reports.
-func CompareFiles(reference, candidate Input, workloadRoot, outputDir string) (Summary, error) {
-	referenceData, err := os.ReadFile(reference.Path)
-	if err != nil {
-		return Summary{}, fmt.Errorf("read reference output: %w", err)
+func CompareFiles(reference, candidate Input, outputDir string) (Summary, error) {
+	if reference.Root == "" || candidate.Root == "" {
+		return Summary{}, errors.New("both workload roots are required")
 	}
-	candidateData, err := os.ReadFile(candidate.Path)
+	referenceReport, err := loadNormalizedReport(reference, "reference")
 	if err != nil {
-		return Summary{}, fmt.Errorf("read candidate output: %w", err)
-	}
-
-	referenceReport, err := normalizeReportData(referenceData, workloadRoot)
-	if err != nil {
-		return Summary{}, fmt.Errorf("normalize reference output: %w", err)
-	}
-	candidateReport, err := normalizeReportData(candidateData, workloadRoot)
-	if err != nil {
-		return Summary{}, fmt.Errorf("normalize candidate output: %w", err)
-	}
-
-	if err := prepareOutputDir(outputDir); err != nil {
 		return Summary{}, err
 	}
-	if err := writeFile(filepath.Join(outputDir, "reference.normalized.json"), referenceReport.data); err != nil {
+	candidateReport, err := loadNormalizedReport(candidate, "candidate")
+	if err != nil {
 		return Summary{}, err
 	}
-	if err := writeFile(filepath.Join(outputDir, "candidate.normalized.json"), candidateReport.data); err != nil {
+
+	if writeErr := writeNormalizedReports(outputDir, referenceReport, candidateReport); writeErr != nil {
+		return Summary{}, writeErr
+	}
+	changeResult, err := compareChangeSets(reference, candidate, outputDir)
+	if err != nil {
+		return Summary{}, err
+	}
+	expectedResult, err := compareExpectedResults(reference, candidate)
+	if err != nil {
 		return Summary{}, err
 	}
 
 	diagnosticsMatch := bytes.Equal(referenceReport.data, candidateReport.data)
 	exitCodesMatch := reference.ExitCode == candidate.ExitCode
 	result := Summary{
-		SchemaVersion:    schemaVersion,
-		Match:            diagnosticsMatch && exitCodesMatch,
-		DiagnosticsMatch: diagnosticsMatch,
-		ExitCodesMatch:   exitCodesMatch,
-		ReferenceExit:    reference.ExitCode,
-		CandidateExit:    candidate.ExitCode,
-		ReferenceIssues:  referenceReport.issueCount,
-		CandidateIssues:  candidateReport.issueCount,
-		ReferenceSHA256:  sha256Hex(referenceReport.data),
-		CandidateSHA256:  sha256Hex(candidateReport.data),
+		SchemaVersion: schemaVersion,
+		Match: diagnosticsMatch && exitCodesMatch && changeResult.match &&
+			expectedResult.referenceMatch && expectedResult.candidateMatch,
+		DiagnosticsMatch:       diagnosticsMatch,
+		ExitCodesMatch:         exitCodesMatch,
+		ChangesCompared:        changeResult.compared,
+		ChangesMatch:           changeResult.match,
+		ExpectedCompared:       expectedResult.compared,
+		ReferenceExpectedMatch: expectedResult.referenceMatch,
+		CandidateExpectedMatch: expectedResult.candidateMatch,
+		ReferenceExit:          reference.ExitCode,
+		CandidateExit:          candidate.ExitCode,
+		ReferenceIssues:        referenceReport.issueCount,
+		CandidateIssues:        candidateReport.issueCount,
+		ReferenceSHA256:        sha256Hex(referenceReport.data),
+		CandidateSHA256:        sha256Hex(candidateReport.data),
+		ReferenceChangesSHA256: changeResult.referenceSHA,
+		CandidateChangesSHA256: changeResult.candidateSHA,
 	}
-	if err := writeJSON(filepath.Join(outputDir, "summary.json"), result); err != nil {
-		return Summary{}, err
+	if !result.Match {
+		result.ReferenceWorktree = reference.WorktreePath
+		result.CandidateWorktree = candidate.WorktreePath
+	}
+	if writeErr := writeJSON(filepath.Join(outputDir, "summary.json"), result); writeErr != nil {
+		return Summary{}, writeErr
 	}
 	if !result.Match {
 		return result, fmt.Errorf("compatibility mismatch; see %s", outputDir)
 	}
+
+	return result, nil
+}
+
+func loadNormalizedReport(input Input, label string) (normalizedReport, error) {
+	data, err := os.ReadFile(input.Path)
+	if err != nil {
+		return normalizedReport{}, fmt.Errorf("read %s output: %w", label, err)
+	}
+	report, err := normalizeReportData(data, input.Root)
+	if err != nil {
+		return normalizedReport{}, fmt.Errorf("normalize %s output: %w", label, err)
+	}
+
+	return report, nil
+}
+
+func writeNormalizedReports(outputDir string, reference, candidate normalizedReport) error {
+	if err := prepareOutputDir(outputDir); err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(outputDir, "reference.normalized.json"), reference.data); err != nil {
+		return err
+	}
+
+	return writeFile(filepath.Join(outputDir, "candidate.normalized.json"), candidate.data)
+}
+
+func compareChangeSets(reference, candidate Input, outputDir string) (changesComparison, error) {
+	result := changesComparison{
+		compared: reference.Changes != nil || candidate.Changes != nil,
+		match:    true,
+	}
+	if !result.compared {
+		return result, nil
+	}
+	if reference.Changes == nil || candidate.Changes == nil {
+		return changesComparison{}, errors.New("both change sets are required")
+	}
+
+	referenceData, err := changes.Marshal(*reference.Changes)
+	if err != nil {
+		return changesComparison{}, fmt.Errorf("marshal reference changes: %w", err)
+	}
+	candidateData, err := changes.Marshal(*candidate.Changes)
+	if err != nil {
+		return changesComparison{}, fmt.Errorf("marshal candidate changes: %w", err)
+	}
+	if writeErr := writeFile(filepath.Join(outputDir, "reference.changes.json"), referenceData); writeErr != nil {
+		return changesComparison{}, writeErr
+	}
+	if writeErr := writeFile(filepath.Join(outputDir, "candidate.changes.json"), candidateData); writeErr != nil {
+		return changesComparison{}, writeErr
+	}
+
+	result.match = changes.EqualSets(*reference.Changes, *candidate.Changes)
+	result.referenceSHA = sha256Hex(referenceData)
+	result.candidateSHA = sha256Hex(candidateData)
+
+	return result, nil
+}
+
+func compareExpectedResults(reference, candidate Input) (expectedComparison, error) {
+	result := expectedComparison{
+		compared:       reference.ExpectedMatch != nil || candidate.ExpectedMatch != nil,
+		referenceMatch: true,
+		candidateMatch: true,
+	}
+	if !result.compared {
+		return result, nil
+	}
+	if reference.ExpectedMatch == nil || candidate.ExpectedMatch == nil {
+		return expectedComparison{}, errors.New("both expected results are required")
+	}
+	result.referenceMatch = *reference.ExpectedMatch
+	result.candidateMatch = *candidate.ExpectedMatch
 
 	return result, nil
 }

@@ -84,6 +84,11 @@ cold caches. The comparator normalizes the workload root, sorts diagnostics
 and report metadata, compares exit codes, and writes raw and normalized outputs
 plus a JSON summary under `compat/`.
 
+Scenarios marked `mutates` run in separate clean detached worktrees. The
+comparator also checks deterministic manifests of added, modified, and deleted
+files, including modes, symlinks, and binary content. Matching worktrees are
+removed; mismatching worktrees are retained and recorded in `summary.json`.
+
 `bench_compat` builds the candidate from `HEAD` and the reference from its merge
 base with `upstream/main`, both in clean detached worktrees. Builds are
 sequential and capped at two-way Go parallelism, a 1 GiB Go memory limit,
@@ -97,10 +102,10 @@ Run the pinned directive compatibility corpus:
 GOMAXPROCS=2 GOFLAGS=-p=2 mise exec go@1.26.0 -- make bench_compat_corpus
 ```
 
-The corpus covers diagnostics, custom configuration, compile errors, cgo,
-path exclusions, and test inclusion. Each case selects its own working
-directory and package inside one pinned checkout. Restrict a smoke run with
-`BENCH_CORPUS_SCENARIO=diagnostic-config`. The target always compares at
+The corpus covers diagnostics, custom configuration, fix mode, compile errors,
+cgo, path exclusions, and test inclusion. Each case selects its own working
+directory and package inside a pinned checkout. Restrict a smoke run with
+`BENCH_CORPUS_SCENARIO=fix-mode`. The target always compares at
 concurrency 1 with a two-minute timeout, two Go processes, niceness 10, and a
 1 GiB RSS ceiling.
 
