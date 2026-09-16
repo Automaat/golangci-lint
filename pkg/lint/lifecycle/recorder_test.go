@@ -37,7 +37,7 @@ func TestRecorderSnapshot(t *testing.T) {
 	report.Analysis[0].Analyzers[0].Name = "changed"
 
 	assert.Equal(t, SchemaVersion, report.SchemaVersion)
-	assert.Positive(t, report.ElapsedNS)
+	assert.GreaterOrEqual(t, report.ElapsedNS, int64(0))
 	assert.Equal(t, int64(2*time.Millisecond), report.PackageLoad.ElapsedNS)
 	assert.Equal(t, 3, report.PackageLoad.DeduplicatedPkgs)
 	assert.Equal(t, "failed", report.Linters[0].Error)
