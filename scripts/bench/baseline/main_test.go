@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestStartCommandStopsAtTimeout(t *testing.T) {
@@ -191,6 +193,19 @@ func TestValidateManifestRejectsEscapingScenarioWorkDir(t *testing.T) {
 	}
 }
 
+func TestValidateScenariosRejectsImplicitFixAndUnsafeExpectedFiles(t *testing.T) {
+	for _, item := range []scenario{
+		{Name: "implicit-fix", Args: []string{"--fix"}},
+		{Name: "expected-without-mutation", ExpectedFiles: map[string]string{"in.go": "out.go"}},
+		{Name: "escaping-actual", Mutates: true, ExpectedFiles: map[string]string{"../in.go": "out.go"}},
+		{Name: "escaping-golden", Mutates: true, ExpectedFiles: map[string]string{"in.go": "../out.go"}},
+	} {
+		if err := validateScenarios([]scenario{item}); err == nil {
+			t.Fatalf("expected scenario %+v to fail", item)
+		}
+	}
+}
+
 func TestLoadManifestRejectsTrailingData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manifest.json")
 	if err := os.WriteFile(path, []byte(`{} {}`), 0o600); err != nil {
@@ -308,6 +323,18 @@ func TestBuildRunArgsUsesScenarioPackages(t *testing.T) {
 	}
 }
 
+func TestBuildRunArgsEnablesExplicitMutation(t *testing.T) {
+	args, err := buildRunArgs(
+		&preparedWorkload{}, &scenario{Mutates: true}, 1, time.Minute, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(args, "--fix=true") || slices.Contains(args, "--fix=false") {
+		t.Fatalf("expected explicit fix mode, got %v", args)
+	}
+}
+
 func TestResolveWorkDir(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "module")
@@ -369,4 +396,79 @@ func TestDirectorySize(t *testing.T) {
 	if actual != 7 {
 		t.Fatalf("expected 7 bytes, got %d", actual)
 	}
+}
+
+func TestExpectedFilesMatch(t *testing.T) {
+	actualRoot := t.TempDir()
+	goldenRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(actualRoot, "actual.go"), []byte("same"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(goldenRoot, "expected.go"), []byte("same"), 0o600))
+	expectedFiles, err := loadExpectedFiles(goldenRoot, map[string]string{"actual.go": "expected.go"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(goldenRoot, "expected.go"), []byte("dirty"), 0o600))
+
+	match, err := expectedFilesMatch(actualRoot, expectedFiles)
+	require.NoError(t, err)
+	require.True(t, match)
+	require.NoError(t, os.WriteFile(filepath.Join(actualRoot, "actual.go"), []byte("different"), 0o600))
+	match, err = expectedFilesMatch(actualRoot, expectedFiles)
+	require.NoError(t, err)
+	require.False(t, match)
+	require.NoError(t, os.Remove(filepath.Join(actualRoot, "actual.go")))
+	match, err = expectedFilesMatch(actualRoot, expectedFiles)
+	require.NoError(t, err)
+	require.False(t, match)
+}
+
+func TestCompatibilityWorktreesAreIsolatedAndRemoved(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repository")
+	require.NoError(t, os.Mkdir(repository, 0o750))
+	runGitTest(t, repository, "init", "--quiet")
+	require.NoError(t, os.WriteFile(filepath.Join(repository, "source.go"), []byte("before"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(repository, "config.yml"), []byte("version: '2'\n"), 0o600))
+	runGitTest(t, repository, "add", "source.go", "config.yml")
+	runGitTest(t, repository,
+		"-c", "user.name=Benchmark Test",
+		"-c", "user.email=benchmark@example.com",
+		"-c", "commit.gpgsign=false",
+		"commit", "--quiet", "-m", "initial",
+	)
+	revision := strings.TrimSpace(runGitTest(t, repository, "rev-parse", "HEAD"))
+
+	runnerCtx, cancelRunner := context.WithCancel(t.Context())
+	r := runner{ctx: runnerCtx, outDir: filepath.Join(t.TempDir(), "artifacts")}
+	workload := &preparedWorkload{
+		workload: workload{Name: "fixture", Revision: revision, Config: "config.yml"},
+		Root:     repository,
+		Targets:  []string{"."},
+	}
+	reference, err := r.createCompatibilityWorktree(workload, "case", upstreamLabel)
+	require.NoError(t, err)
+	candidate, err := r.createCompatibilityWorktree(workload, "case", forkLabel)
+	require.NoError(t, err)
+	require.NotEqual(t, reference.Root, candidate.Root)
+	require.True(t, strings.HasPrefix(reference.ConfigPath, reference.Root))
+	require.True(t, strings.HasPrefix(candidate.ConfigPath, candidate.Root))
+	require.NoError(t, os.WriteFile(filepath.Join(reference.Root, "source.go"), []byte("fixed"), 0o600))
+	candidateData, err := os.ReadFile(filepath.Join(candidate.Root, "source.go"))
+	require.NoError(t, err)
+	require.Equal(t, "before", string(candidateData))
+
+	cancelRunner()
+	require.NoError(t, r.removeCompatibilityWorktree(repository, candidate.Root))
+	require.NoError(t, r.removeCompatibilityWorktree(repository, reference.Root))
+	listed := runGitTest(t, repository, "worktree", "list", "--porcelain")
+	require.NotContains(t, listed, reference.Root)
+	require.NotContains(t, listed, candidate.Root)
+}
+
+func runGitTest(t *testing.T, repository string, args ...string) string {
+	t.Helper()
+	commandArgs := append([]string{"-C", repository}, args...)
+	output, err := exec.CommandContext(t.Context(), "git", commandArgs...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+
+	return string(output)
 }
