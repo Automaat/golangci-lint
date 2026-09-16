@@ -73,8 +73,9 @@ Artifacts:
 Compare JSON diagnostics from reference and candidate binaries:
 
 ```bash
-make bench_baseline UPSTREAM_BIN=/absolute/path/to/upstream/golangci-lint \
-  BENCH_ARGS='--compatibility --workload small --scenario goanalysis --concurrency 1 --prepare=false --run-timeout 2m --max-rss-mib 1024 --go-max-procs 2 --nice 10'
+GOMAXPROCS=2 GOFLAGS=-p=2 mise exec go@1.26.0 -- \
+  make bench_compat \
+  BENCH_ARGS='--workload small --scenario goanalysis --concurrency 1'
 ```
 
 Compatibility mode requires both binaries plus explicit workload and
@@ -83,12 +84,20 @@ cold caches. The comparator normalizes the workload root, sorts diagnostics
 and report metadata, compares exit codes, and writes raw and normalized outputs
 plus a JSON summary under `compat/`.
 
+`bench_compat` builds the candidate from `HEAD` and the reference from its merge
+base with `upstream/main`, both in clean detached worktrees. Builds are
+sequential and capped at two-way Go parallelism, a 1 GiB Go memory limit,
+niceness 10, and five minutes. `dist/bench/bin/pair.json` records resolved refs,
+commits, binary hashes, and limits. Override refs with `BENCH_CANDIDATE_REF` and
+`BENCH_UPSTREAM_REF`.
+
 For the multi-module workload, always select a module. Do not run its root above
 concurrency 1 under a 1 GiB RSS limit:
 
 ```bash
-make bench_baseline UPSTREAM_BIN=/absolute/path/to/upstream/golangci-lint \
-  BENCH_ARGS='--compatibility --workload multi-module --module scripts/gen_github_action_config --scenario goanalysis --concurrency 1 --prepare=false --run-timeout 2m --max-rss-mib 1024 --go-max-procs 2 --nice 10'
+GOMAXPROCS=2 GOFLAGS=-p=2 mise exec go@1.26.0 -- \
+  make bench_compat \
+  BENCH_ARGS='--workload multi-module --module scripts/gen_github_action_config --scenario goanalysis --concurrency 1'
 ```
 
 Use `make bench_compare` only to compare JSON files captured separately.
