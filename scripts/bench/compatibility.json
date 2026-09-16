@@ -33,6 +33,50 @@
       ]
     },
     {
+      "name": "timeout",
+      "mode": "timeout",
+      "work_dir": "pkg/golinters/misspell",
+      "packages": ["testdata/misspell.go"],
+      "args": [
+        "--no-config",
+        "--default=none",
+        "-Emisspell"
+      ]
+    },
+    {
+      "name": "cancellation",
+      "mode": "cancel",
+      "work_dir": "pkg/golinters/misspell",
+      "packages": ["."],
+      "args": [
+        "--no-config",
+        "--default=none",
+        "-Emisspell"
+      ]
+    },
+    {
+      "name": "parallel-shared-cache",
+      "mode": "parallel",
+      "work_dir": "pkg/golinters/misspell",
+      "packages": ["testdata/misspell.go"],
+      "args": [
+        "--default=none",
+        "-Emisspell",
+        "--config=testdata/misspell.yml"
+      ]
+    },
+    {
+      "name": "corrupted-cache",
+      "mode": "corrupted-cache",
+      "work_dir": "pkg/golinters/misspell",
+      "packages": ["testdata/misspell.go"],
+      "args": [
+        "--default=none",
+        "-Emisspell",
+        "--config=testdata/misspell.yml"
+      ]
+    },
+    {
       "name": "fix-mode",
       "work_dir": "test",
       "packages": ["testdata/fix/in/multiple-issues-fix.go"],

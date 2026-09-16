@@ -65,6 +65,69 @@ func TestNormalizeReportDataWindowsPath(t *testing.T) {
 	}
 }
 
+func TestCompareFilesAcceptsMatchingInterruptedOutcomes(t *testing.T) {
+	root := t.TempDir()
+	result, err := CompareFiles(
+		Input{
+			Path: filepath.Join(root, "missing-reference.json"), Root: root,
+			Outcome: &ProcessOutcome{
+				ExitCode: -1, TerminationReason: "cancel", OptionalReport: true, CancellationLatencyNS: 10,
+			},
+		},
+		Input{
+			Path: filepath.Join(root, "missing-candidate.json"), Root: root,
+			Outcome: &ProcessOutcome{
+				ExitCode: -1, TerminationReason: "cancel", OptionalReport: true, CancellationLatencyNS: 20,
+			},
+		},
+		filepath.Join(root, "comparison"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Match || !result.OutcomesMatch || result.DiagnosticsCompared || !result.DiagnosticsMatch {
+		t.Fatalf("unexpected summary: %+v", result)
+	}
+	if result.ReferenceReportState != reportMissing || result.CandidateReportState != reportMissing {
+		t.Fatalf("unexpected report states: %+v", result)
+	}
+}
+
+func TestCompareFilesRejectsInvalidOptionalReports(t *testing.T) {
+	root := t.TempDir()
+	reference := filepath.Join(root, "reference.json")
+	candidate := filepath.Join(root, "candidate.json")
+	for _, path := range []string{reference, candidate} {
+		if err := os.WriteFile(path, []byte("incomplete"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := CompareFiles(
+		Input{Path: reference, Root: root, Outcome: &ProcessOutcome{OptionalReport: true}},
+		Input{Path: candidate, Root: root, Outcome: &ProcessOutcome{OptionalReport: true}},
+		filepath.Join(root, "comparison"),
+	)
+	if err == nil || result.Match || result.DiagnosticsMatch {
+		t.Fatalf("expected invalid reports to mismatch: %+v, %v", result, err)
+	}
+}
+
+func TestCompareFilesRejectsSurvivingProcesses(t *testing.T) {
+	root := t.TempDir()
+	reference := filepath.Join(root, "reference.json")
+	candidate := filepath.Join(root, "candidate.json")
+	writeTestReport(t, reference, filepath.Join(root, "file.go"))
+	writeTestReport(t, candidate, filepath.Join(root, "file.go"))
+	result, err := CompareFiles(
+		Input{Path: reference, Root: root},
+		Input{Path: candidate, Root: root, Outcome: &ProcessOutcome{SurvivingProcesses: 1}},
+		filepath.Join(root, "comparison"),
+	)
+	if err == nil || result.Match || result.OutcomesMatch {
+		t.Fatalf("expected surviving process to mismatch: %+v, %v", result, err)
+	}
+}
+
 func TestCompareFilesUsesSeparateRootsAndChanges(t *testing.T) {
 	referenceRoot := filepath.Join(t.TempDir(), "reference")
 	candidateRoot := filepath.Join(t.TempDir(), "candidate")
@@ -86,8 +149,14 @@ func TestCompareFilesUsesSeparateRootsAndChanges(t *testing.T) {
 	}
 	expected := true
 	result, err := CompareFiles(
-		Input{Path: referenceReport, Root: referenceRoot, ExitCode: 1, Changes: &changeSet, ExpectedMatch: &expected},
-		Input{Path: candidateReport, Root: candidateRoot, ExitCode: 1, Changes: &changeSet, ExpectedMatch: &expected},
+		Input{
+			Path: referenceReport, Root: referenceRoot, Outcome: &ProcessOutcome{ExitCode: 1},
+			Changes: &changeSet, ExpectedMatch: &expected,
+		},
+		Input{
+			Path: candidateReport, Root: candidateRoot, Outcome: &ProcessOutcome{ExitCode: 1},
+			Changes: &changeSet, ExpectedMatch: &expected,
+		},
 		filepath.Join(t.TempDir(), "comparison"),
 	)
 	if err != nil {

@@ -103,11 +103,14 @@ GOMAXPROCS=2 GOFLAGS=-p=2 mise exec go@1.26.0 -- make bench_compat_corpus
 ```
 
 The corpus covers diagnostics, custom configuration, fix mode, compile errors,
-cgo, path exclusions, and test inclusion. Each case selects its own working
-directory and package inside a pinned checkout. Restrict a smoke run with
-`BENCH_CORPUS_SCENARIO=fix-mode`. The target always compares at
-concurrency 1 with a two-minute timeout, two Go processes, niceness 10, and a
-1 GiB RSS ceiling.
+cgo, path exclusions, test inclusion, internal timeout, external cancellation,
+two simultaneous shared-cache runners, and corrupted-cache recovery. Interrupted
+cases compare exit and termination outcomes without inventing an empty JSON
+report; every case rejects surviving child processes. Each case selects its own
+working directory and package inside a pinned checkout. Restrict a smoke run
+with `BENCH_CORPUS_SCENARIO=cancellation`. The target always compares at
+concurrency 1 with a two-minute timeout, at most two linter processes, two Go
+CPUs per process, niceness 10, and a 1 GiB per-process RSS ceiling.
 
 For the multi-module workload, always select a module. Do not run its root above
 concurrency 1 under a 1 GiB RSS limit:

@@ -23,7 +23,7 @@ func TestStartCommandStopsAtTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sleep", "30")
-	finished, _, err := startCommand(ctx, cmd)
+	finished, terminated, _, err := startCommand(ctx, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,6 +31,14 @@ func TestStartCommandStopsAtTimeout(t *testing.T) {
 		t.Fatal("expected timed out command to fail")
 	}
 	close(finished)
+	termination := <-terminated
+	observed := make(map[int32]struct{}, len(termination.pids))
+	for _, pid := range termination.pids {
+		observed[pid] = struct{}{}
+	}
+	if alive := waitForProcessExit(observed); alive != 0 {
+		t.Fatalf("expected no surviving processes, got %d", alive)
+	}
 }
 
 func TestTrackPeakTreeRSSStopsAtLimit(t *testing.T) {
@@ -48,6 +56,24 @@ func TestTrackPeakTreeRSSStopsAtLimit(t *testing.T) {
 	if !stats.exceeded {
 		t.Fatalf("expected RSS limit to be exceeded, peak was %d bytes", stats.peak)
 	}
+}
+
+func TestStartCommandStopsUnsampledOrphan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires /bin/sh")
+	}
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", "sleep 30 &")
+	finished, terminated, _, err := startCommand(t.Context(), cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Wait())
+	close(finished)
+	termination := <-terminated
+	require.Positive(t, termination.orphaned)
+	observed := make(map[int32]struct{}, len(termination.pids))
+	for _, pid := range termination.pids {
+		observed[pid] = struct{}{}
+	}
+	require.Zero(t, waitForProcessExit(observed))
 }
 
 func TestParseOptionsSafetyDefaults(t *testing.T) {
@@ -196,12 +222,29 @@ func TestValidateManifestRejectsEscapingScenarioWorkDir(t *testing.T) {
 func TestValidateScenariosRejectsImplicitFixAndUnsafeExpectedFiles(t *testing.T) {
 	for _, item := range []scenario{
 		{Name: "implicit-fix", Args: []string{"--fix"}},
+		{Name: "implicit-timeout", Args: []string{"--timeout=1ms"}},
+		{Name: "implicit-runner-mode", Args: []string{"--allow-parallel-runners"}},
+		{Name: "unknown-mode", Mode: "unknown"},
+		{Name: "mutating-failure", Mode: compatibilityModeCancel, Mutates: true},
 		{Name: "expected-without-mutation", ExpectedFiles: map[string]string{"in.go": "out.go"}},
 		{Name: "escaping-actual", Mutates: true, ExpectedFiles: map[string]string{"../in.go": "out.go"}},
 		{Name: "escaping-golden", Mutates: true, ExpectedFiles: map[string]string{"in.go": "../out.go"}},
 	} {
 		if err := validateScenarios([]scenario{item}); err == nil {
 			t.Fatalf("expected scenario %+v to fail", item)
+		}
+	}
+}
+
+func TestValidateScenariosAcceptsCompatibilityModes(t *testing.T) {
+	for _, mode := range []string{
+		compatibilityModeTimeout,
+		compatibilityModeCancel,
+		compatibilityModeParallel,
+		compatibilityModeCorrupt,
+	} {
+		if err := validateScenarios([]scenario{{Name: mode, Mode: mode}}); err != nil {
+			t.Fatalf("expected mode %q to pass: %v", mode, err)
 		}
 	}
 }
@@ -307,6 +350,29 @@ func TestBuildRunArgsUsesSafetyTimeout(t *testing.T) {
 	}
 }
 
+func TestBuildRunArgsUsesCompatibilityControls(t *testing.T) {
+	timeoutArgs, err := buildRunArgs(
+		&preparedWorkload{}, &scenario{Mode: compatibilityModeTimeout}, 1, time.Minute, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(timeoutArgs, "--timeout=1ms") {
+		t.Fatalf("expected compatibility timeout, got %v", timeoutArgs)
+	}
+
+	parallelArgs, err := buildRunArgs(
+		&preparedWorkload{}, &scenario{Mode: compatibilityModeParallel}, 1, time.Minute, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(parallelArgs, "--allow-parallel-runners") ||
+		slices.Contains(parallelArgs, "--allow-serial-runners") {
+		t.Fatalf("expected parallel runner mode, got %v", parallelArgs)
+	}
+}
+
 func TestBuildRunArgsUsesScenarioPackages(t *testing.T) {
 	args, err := buildRunArgs(
 		&preparedWorkload{workload: workload{Packages: []string{"./..."}}},
@@ -396,6 +462,25 @@ func TestDirectorySize(t *testing.T) {
 	if actual != 7 {
 		t.Fatalf("expected 7 bytes, got %d", actual)
 	}
+}
+
+func TestCorruptCacheData(t *testing.T) {
+	dir := t.TempDir()
+	data := filepath.Join(dir, "00", "entry-d")
+	index := filepath.Join(dir, "00", "entry-a")
+	require.NoError(t, os.MkdirAll(filepath.Dir(data), 0o750))
+	require.NoError(t, os.WriteFile(data, []byte("valid data"), 0o600))
+	require.NoError(t, os.WriteFile(index, []byte("valid index"), 0o600))
+
+	count, err := corruptCacheData(dir)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	actual, err := os.ReadFile(data)
+	require.NoError(t, err)
+	require.Equal(t, "corrupted cache data\n", string(actual))
+	actual, err = os.ReadFile(index)
+	require.NoError(t, err)
+	require.Equal(t, "valid index", string(actual))
 }
 
 func TestExpectedFilesMatch(t *testing.T) {

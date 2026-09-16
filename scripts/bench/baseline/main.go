@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -19,12 +20,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/process"
 
+	"github.com/golangci/golangci-lint/v2/pkg/exitcodes"
 	"github.com/golangci/golangci-lint/v2/scripts/bench/internal/changes"
 	"github.com/golangci/golangci-lint/v2/scripts/bench/internal/diagnostics"
 )
@@ -45,6 +48,16 @@ const (
 	parentDirectory             = ".."
 	forkLabel                   = "fork"
 	upstreamLabel               = "upstream"
+	compatibilityModeTimeout    = "timeout"
+	compatibilityModeCancel     = "cancel"
+	compatibilityModeParallel   = "parallel"
+	compatibilityModeCorrupt    = "corrupted-cache"
+	compatibilityCLITimeout     = time.Millisecond
+	compatibilityCancelAfter    = 25 * time.Millisecond
+	compatibilityCancelLimit    = 5 * time.Second
+	processExitWait             = time.Second
+	processExitPoll             = 10 * time.Millisecond
+	benchmarkRunMarkerEnv       = "GOLANGCI_BENCH_RUN_ID"
 )
 
 type manifest struct {
@@ -76,6 +89,7 @@ type scenario struct {
 	Args          []string          `json:"args,omitempty"`
 	Mutates       bool              `json:"mutates,omitempty"`
 	ExpectedFiles map[string]string `json:"expected_files,omitempty"`
+	Mode          string            `json:"mode,omitempty"`
 }
 
 type options struct {
@@ -172,48 +186,65 @@ type workloadMetadata struct {
 }
 
 type result struct {
-	SchemaVersion     int       `json:"schema_version"`
-	Binary            string    `json:"binary"`
-	Workload          string    `json:"workload"`
-	WorkloadRevision  string    `json:"workload_revision"`
-	Target            string    `json:"target"`
-	Scenario          string    `json:"scenario"`
-	CacheMode         string    `json:"cache_mode"`
-	Concurrency       int       `json:"concurrency"`
-	Iteration         int       `json:"iteration"`
-	Purpose           string    `json:"purpose"`
-	StartedAt         time.Time `json:"started_at"`
-	WallNS            int64     `json:"wall_ns"`
-	UserCPUNS         int64     `json:"user_cpu_ns"`
-	SystemCPUNS       int64     `json:"system_cpu_ns"`
-	PeakTreeRSSBytes  uint64    `json:"peak_tree_rss_bytes"`
-	CacheBytesBefore  int64     `json:"cache_bytes_before"`
-	CacheBytesAfter   int64     `json:"cache_bytes_after"`
-	ExitCode          int       `json:"exit_code"`
-	LogPath           string    `json:"log_path"`
-	ArtifactPath      string    `json:"artifact_path,omitempty"`
-	TerminationReason string    `json:"termination_reason,omitempty"`
-	Command           []string  `json:"command"`
+	SchemaVersion      int       `json:"schema_version"`
+	Binary             string    `json:"binary"`
+	Workload           string    `json:"workload"`
+	WorkloadRevision   string    `json:"workload_revision"`
+	Target             string    `json:"target"`
+	Scenario           string    `json:"scenario"`
+	CacheMode          string    `json:"cache_mode"`
+	Concurrency        int       `json:"concurrency"`
+	Iteration          int       `json:"iteration"`
+	Purpose            string    `json:"purpose"`
+	StartedAt          time.Time `json:"started_at"`
+	WallNS             int64     `json:"wall_ns"`
+	UserCPUNS          int64     `json:"user_cpu_ns"`
+	SystemCPUNS        int64     `json:"system_cpu_ns"`
+	PeakTreeRSSBytes   uint64    `json:"peak_tree_rss_bytes"`
+	CacheBytesBefore   int64     `json:"cache_bytes_before"`
+	CacheBytesAfter    int64     `json:"cache_bytes_after"`
+	ExitCode           int       `json:"exit_code"`
+	LogPath            string    `json:"log_path"`
+	ArtifactPath       string    `json:"artifact_path,omitempty"`
+	TerminationReason  string    `json:"termination_reason,omitempty"`
+	CancellationNS     int64     `json:"cancellation_latency_ns,omitempty"`
+	SurvivingProcesses int       `json:"surviving_processes"`
+	Command            []string  `json:"command"`
 }
 
 type executionStats struct {
-	startedAt         time.Time
-	wall              time.Duration
-	userCPU           time.Duration
-	systemCPU         time.Duration
-	peakRSS           uint64
-	cacheBefore       int64
-	cacheAfter        int64
-	exitCode          int
-	logPath           string
-	artifactPath      string
-	terminationReason string
-	args              []string
+	startedAt          time.Time
+	wall               time.Duration
+	userCPU            time.Duration
+	systemCPU          time.Duration
+	peakRSS            uint64
+	cacheBefore        int64
+	cacheAfter         int64
+	exitCode           int
+	logPath            string
+	artifactPath       string
+	terminationReason  string
+	cancellation       time.Duration
+	survivingProcesses int
+	args               []string
 }
 
 type memoryStats struct {
 	peak     uint64
 	exceeded bool
+	observed map[int32]struct{}
+}
+
+type executionControl struct {
+	start       <-chan struct{}
+	ready       chan<- error
+	marker      string
+	cancelAfter time.Duration
+}
+
+type processTermination struct {
+	pids     []int32
+	orphaned int
 }
 
 type runner struct {
@@ -225,6 +256,7 @@ type runner struct {
 	binaries  []binary
 	workloads []preparedWorkload
 	scenarios []scenario
+	resultsMu sync.Mutex
 }
 
 func main() {
@@ -527,13 +559,11 @@ func validateScenarios(scenarios []scenario) error {
 }
 
 func validateScenario(item *scenario) error {
+	if err := validateScenarioExecution(item); err != nil {
+		return err
+	}
 	if item.UseConfig && slices.Contains(item.Args, "--no-config") {
 		return fmt.Errorf("scenario %q cannot use config and --no-config", item.Name)
-	}
-	if slices.ContainsFunc(item.Args, func(value string) bool {
-		return value == "--fix" || strings.HasPrefix(value, "--fix=")
-	}) {
-		return fmt.Errorf("scenario %q must use mutates instead of a fix argument", item.Name)
 	}
 	if filepath.IsAbs(item.WorkDir) {
 		return fmt.Errorf("scenario %q working directory must be relative", item.Name)
@@ -552,6 +582,31 @@ func validateScenario(item *scenario) error {
 	}
 
 	return validateExpectedFiles(item)
+}
+
+func validateScenarioExecution(item *scenario) error {
+	if !slices.Contains([]string{
+		"", compatibilityModeTimeout, compatibilityModeCancel,
+		compatibilityModeParallel, compatibilityModeCorrupt,
+	}, item.Mode) {
+		return fmt.Errorf("scenario %q has unsupported mode %q", item.Name, item.Mode)
+	}
+	if item.Mode != "" && item.Mutates {
+		return fmt.Errorf("scenario %q cannot combine mode %q with mutates", item.Name, item.Mode)
+	}
+	if slices.ContainsFunc(item.Args, func(value string) bool {
+		return value == "--fix" || strings.HasPrefix(value, "--fix=")
+	}) {
+		return fmt.Errorf("scenario %q must use mutates instead of a fix argument", item.Name)
+	}
+	if slices.ContainsFunc(item.Args, func(value string) bool {
+		return value == "--timeout" || strings.HasPrefix(value, "--timeout=") ||
+			value == "--allow-parallel-runners" || value == "--allow-serial-runners"
+	}) {
+		return fmt.Errorf("scenario %q execution controls are managed by mode", item.Name)
+	}
+
+	return nil
 }
 
 func validateExpectedFiles(item *scenario) error {
@@ -1014,6 +1069,12 @@ func (r *runner) runCompatibility(concurrency []int) error {
 			for scenarioIndex := range r.scenarios {
 				scenario := &r.scenarios[scenarioIndex]
 				for _, value := range concurrency {
+					if scenario.Mode != "" {
+						if err := r.runSpecialCompatibility(binaries, workload, target, scenario, value); err != nil {
+							return err
+						}
+						continue
+					}
 					if scenario.Mutates {
 						if err := r.runMutationCompatibility(binaries, workload, target, scenario, value); err != nil {
 							return err
@@ -1033,9 +1094,7 @@ func (r *runner) runCompatibility(concurrency []int) error {
 						if err != nil {
 							return err
 						}
-						inputs[label] = diagnostics.Input{
-							Path: artifact, Root: workload.Root, ExitCode: stats.exitCode,
-						}
+						inputs[label] = compatibilityInput(artifact, workload.Root, stats, "", false)
 					}
 
 					caseName := compatibilityCaseBase(workload, target, scenario, value)
@@ -1056,6 +1115,266 @@ func (r *runner) runCompatibility(concurrency []int) error {
 	}
 
 	return nil
+}
+
+func (r *runner) runSpecialCompatibility(
+	binaries map[string]binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+) error {
+	switch scenario.Mode {
+	case compatibilityModeTimeout, compatibilityModeCancel:
+		return r.runInterruptedCompatibility(binaries, workload, target, scenario, concurrency)
+	case compatibilityModeParallel:
+		return r.runParallelCompatibility(binaries, workload, target, scenario, concurrency)
+	case compatibilityModeCorrupt:
+		return r.runCorruptedCacheCompatibility(binaries, workload, target, scenario, concurrency)
+	default:
+		return fmt.Errorf("unsupported compatibility mode %q", scenario.Mode)
+	}
+}
+
+func (r *runner) runInterruptedCompatibility(
+	binaries map[string]binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+) error {
+	inputs := make(map[string]diagnostics.Input, len(binaries))
+	for _, label := range []string{upstreamLabel, forkLabel} {
+		bin := binaries[label]
+		purpose := "compatibility-" + scenario.Mode
+		artifact := r.compatibilityArtifact(bin, workload, target, scenario, concurrency, purpose)
+		cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, purpose)
+		control := executionControl{}
+		if scenario.Mode == compatibilityModeCancel {
+			control.cancelAfter = compatibilityCancelAfter
+		}
+		stats, err := r.executeControlled(
+			bin, workload, target, scenario, concurrency, 1, "cold", purpose, cacheDir, artifact, control,
+			compatibilityOutputArgs(artifact)...,
+		)
+		if err != nil {
+			return err
+		}
+		termination := "cli_timeout"
+		if scenario.Mode == compatibilityModeTimeout {
+			if stats.exitCode != exitcodes.Timeout {
+				return fmt.Errorf("%s timeout exited with %d, expected %d", label, stats.exitCode, exitcodes.Timeout)
+			}
+		} else {
+			termination = stats.terminationReason
+			if termination != compatibilityModeCancel {
+				return fmt.Errorf("%s cancellation ended as %q", label, termination)
+			}
+			if stats.cancellation > compatibilityCancelLimit {
+				return fmt.Errorf("%s cancellation took %s", label, stats.cancellation)
+			}
+		}
+		inputs[label] = compatibilityInput(artifact, workload.Root, stats, termination, true)
+	}
+
+	return r.compareCompatibilityCase(compatibilityCaseBase(workload, target, scenario, concurrency), inputs)
+}
+
+func (r *runner) runParallelCompatibility(
+	binaries map[string]binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+) error {
+	inputs := make(map[string][]diagnostics.Input, len(binaries))
+	for _, label := range []string{upstreamLabel, forkLabel} {
+		values, err := r.runParallelBinary(binaries[label], workload, target, scenario, concurrency)
+		if err != nil {
+			return err
+		}
+		inputs[label] = values
+	}
+
+	caseName := compatibilityCaseBase(workload, target, scenario, concurrency)
+	for index := range inputs[upstreamLabel] {
+		pair := map[string]diagnostics.Input{
+			upstreamLabel: inputs[upstreamLabel][index],
+			forkLabel:     inputs[forkLabel][index],
+		}
+		if err := r.compareCompatibilityCase(
+			filepath.Join(caseName, fmt.Sprintf("run-%d", index+1)), pair,
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *runner) runParallelBinary(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+) ([]diagnostics.Input, error) {
+	const processCount = 2
+	type executionResult struct {
+		index    int
+		artifact string
+		stats    *executionStats
+		err      error
+	}
+
+	cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, "compatibility-parallel")
+	start := make(chan struct{})
+	ready := make(chan error, processCount)
+	results := make(chan executionResult, processCount)
+	for index := range processCount {
+		go func() {
+			purpose := fmt.Sprintf("compatibility-parallel-%d", index+1)
+			artifact := r.compatibilityArtifact(bin, workload, target, scenario, concurrency, purpose)
+			stats, err := r.executeControlled(
+				bin, workload, target, scenario, concurrency, 1, "cold", purpose, cacheDir, artifact,
+				executionControl{start: start, ready: ready}, compatibilityOutputArgs(artifact)...,
+			)
+			results <- executionResult{index: index, artifact: artifact, stats: stats, err: err}
+		}()
+	}
+	var readinessErr error
+	for range processCount {
+		readinessErr = errors.Join(readinessErr, <-ready)
+	}
+	close(start)
+
+	inputs := make([]diagnostics.Input, processCount)
+	resultErr := readinessErr
+	for range processCount {
+		result := <-results
+		if result.err != nil {
+			resultErr = errors.Join(resultErr, result.err)
+			continue
+		}
+		inputs[result.index] = compatibilityInput(result.artifact, workload.Root, result.stats, "", false)
+	}
+	if resultErr != nil {
+		return nil, resultErr
+	}
+
+	return inputs, nil
+}
+
+func (r *runner) runCorruptedCacheCompatibility(
+	binaries map[string]binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+) error {
+	inputs := make(map[string]diagnostics.Input, len(binaries))
+	for _, label := range []string{upstreamLabel, forkLabel} {
+		bin := binaries[label]
+		cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, "compatibility-corrupted-cache")
+		seedPurpose := "compatibility-corrupted-cache-seed"
+		seedArtifact := r.compatibilityArtifact(bin, workload, target, scenario, concurrency, seedPurpose)
+		if _, err := r.execute(
+			bin, workload, target, scenario, concurrency, 1, "cold", seedPurpose, cacheDir, seedArtifact,
+			compatibilityOutputArgs(seedArtifact)...,
+		); err != nil {
+			return err
+		}
+		corrupted, err := corruptCacheData(cacheDir)
+		if err != nil {
+			return fmt.Errorf("corrupt %s cache: %w", label, err)
+		}
+		if corrupted == 0 {
+			return fmt.Errorf("corrupt %s cache: no data entries found", label)
+		}
+
+		purpose := "compatibility-corrupted-cache"
+		artifact := r.compatibilityArtifact(bin, workload, target, scenario, concurrency, purpose)
+		stats, err := r.execute(
+			bin, workload, target, scenario, concurrency, 1, "warm", purpose, cacheDir, artifact,
+			compatibilityOutputArgs(artifact)...,
+		)
+		if err != nil {
+			return err
+		}
+		inputs[label] = compatibilityInput(artifact, workload.Root, stats, "", false)
+	}
+
+	return r.compareCompatibilityCase(compatibilityCaseBase(workload, target, scenario, concurrency), inputs)
+}
+
+func compatibilityInput(
+	artifact string,
+	root string,
+	stats *executionStats,
+	termination string,
+	optionalReport bool,
+) diagnostics.Input {
+	return diagnostics.Input{
+		Path: artifact,
+		Root: root,
+		Outcome: &diagnostics.ProcessOutcome{
+			ExitCode:              stats.exitCode,
+			TerminationReason:     termination,
+			OptionalReport:        optionalReport,
+			CancellationLatencyNS: stats.cancellation.Nanoseconds(),
+			SurvivingProcesses:    stats.survivingProcesses,
+		},
+	}
+}
+
+func (r *runner) compareCompatibilityCase(caseName string, inputs map[string]diagnostics.Input) error {
+	outputDir := filepath.Join(r.outDir, "compat", caseName)
+	summary, err := diagnostics.CompareFiles(inputs[upstreamLabel], inputs[forkLabel], outputDir)
+	if err != nil {
+		return fmt.Errorf("compare %s: %w", caseName, err)
+	}
+	_, _ = fmt.Fprintf(
+		os.Stdout, "compatibility %s: %d issues, exit code %d, termination %q\n",
+		caseName, summary.ReferenceIssues, summary.ReferenceExit, summary.ReferenceTermination,
+	)
+
+	return nil
+}
+
+func (r *runner) compatibilityArtifact(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+	purpose string,
+) string {
+	base := artifactBase(bin, workload, target, scenario, concurrency, 1, "cold", purpose)
+	return filepath.Join(r.outDir, "compat", "raw", base+".json")
+}
+
+func corruptCacheData(root string) (int, error) {
+	var paths []string
+	if err := filepath.WalkDir(root, func(path string, entry iofs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), "-d") {
+			paths = append(paths, path)
+		}
+
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	slices.Sort(paths)
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte("corrupted cache data\n"), privateFileMode); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(paths), nil
 }
 
 func (r *runner) runMutationCompatibility(
@@ -1170,10 +1489,9 @@ func (r *runner) runMutationBinary(
 		return diagnostics.Input{}, err
 	}
 	changeSet := changes.Diff(baseline, after)
-	input := diagnostics.Input{
-		Path: artifact, Root: workload.Root, ExitCode: stats.exitCode,
-		Changes: &changeSet, WorktreePath: workload.Root,
-	}
+	input := compatibilityInput(artifact, workload.Root, stats, "", false)
+	input.Changes = &changeSet
+	input.WorktreePath = workload.Root
 	if len(scenario.ExpectedFiles) > 0 {
 		expectedMatch, matchErr := expectedFilesMatch(workload.Root, expectedContent)
 		if matchErr != nil {
@@ -1372,6 +1690,32 @@ func (r *runner) execute(
 	artifact string,
 	extra ...string,
 ) (*executionStats, error) {
+	return r.executeControlled(
+		bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose, cacheDir, artifact,
+		executionControl{}, extra...,
+	)
+}
+
+func (r *runner) executeControlled(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+	iteration int,
+	cacheMode string,
+	purpose string,
+	cacheDir string,
+	artifact string,
+	control executionControl,
+	extra ...string,
+) (stats *executionStats, runErr error) {
+	readySent := false
+	defer func() {
+		if control.ready != nil && !readySent {
+			control.ready <- runErr
+		}
+	}()
 	if err := os.MkdirAll(cacheDir, privateDirMode); err != nil {
 		return nil, fmt.Errorf("create cache directory: %w", err)
 	}
@@ -1400,13 +1744,54 @@ func (r *runner) execute(
 	runCtx, cancel := context.WithTimeout(r.ctx, r.opts.RunTimeout)
 	defer cancel()
 	cmd := r.newBenchmarkCommand(bin, workDir, cacheDir, args, extra, logFile)
+	control.marker = bytesSHA256([]byte(r.outDir + "\x00" + base))
+	cmd.Env = replaceEnv(cmd.Env, benchmarkRunMarkerEnv+"="+control.marker)
+	if control.ready != nil {
+		control.ready <- nil
+		readySent = true
+	}
+	stats, err = r.runControlledCommand(runCtx, cancel, cmd, control)
+	if err != nil {
+		return nil, err
+	}
+	cacheAfter, err := directorySize(cacheDir)
+	if err != nil {
+		return nil, err
+	}
+	stats.cacheBefore = cacheBefore
+	stats.cacheAfter = cacheAfter
+	stats.logPath = logPath
+	stats.artifactPath = artifact
+	stats.args = args
+
+	if err := r.recordExecution(bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose, stats); err != nil {
+		return nil, err
+	}
+
+	return stats, nil
+}
+
+func (r *runner) runControlledCommand(
+	runCtx context.Context,
+	cancel context.CancelFunc,
+	cmd *exec.Cmd,
+	control executionControl,
+) (*executionStats, error) {
+	if control.start != nil {
+		select {
+		case <-control.start:
+		case <-runCtx.Done():
+			return nil, fmt.Errorf("wait for benchmark start: %w", runCtx.Err())
+		}
+	}
 
 	startedAt := time.Now().UTC()
 	started := time.Now()
-	finished, rootPID, startErr := startCommand(runCtx, cmd)
+	finished, terminated, rootPID, startErr := startCommand(runCtx, cmd)
 	if startErr != nil {
 		return nil, startErr
 	}
+	cancelledAt := scheduleCancellation(cancel, finished, control.cancelAfter)
 	stopMemory := make(chan struct{})
 	peakMemory := trackPeakTreeRSS(
 		runCtx,
@@ -1416,22 +1801,36 @@ func (r *runner) execute(
 		stopMemory,
 	)
 	waitErr := cmd.Wait()
+	waitFinished := time.Now()
 	close(finished)
+	cancelStarted := <-cancelledAt
+	termination := <-terminated
 	close(stopMemory)
 	rssStats := <-peakMemory
 	wall := time.Since(started)
 	terminationReason := ""
 	if rssStats.exceeded {
 		terminationReason = "rss_limit"
+	} else if !cancelStarted.IsZero() {
+		terminationReason = compatibilityModeCancel
 	} else if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		terminationReason = "timeout"
 	}
-
-	exitCode, err := commandExitCode(waitErr)
+	cancellation := time.Duration(0)
+	if !cancelStarted.IsZero() {
+		cancellation = waitFinished.Sub(cancelStarted)
+	}
+	for _, pid := range termination.pids {
+		rssStats.observed[pid] = struct{}{}
+	}
+	markedProcesses, err := terminateResidualProcesses(control.marker)
 	if err != nil {
 		return nil, err
 	}
-	cacheAfter, err := directorySize(cacheDir)
+	orphanedProcesses := termination.orphaned + markedProcesses
+	survivingProcesses := orphanedProcesses + waitForProcessExit(rssStats.observed)
+
+	exitCode, err := commandExitCode(waitErr)
 	if err != nil {
 		return nil, err
 	}
@@ -1442,22 +1841,15 @@ func (r *runner) execute(
 		systemCPU = cmd.ProcessState.SystemTime()
 	}
 	stats := executionStats{
-		startedAt:         startedAt,
-		wall:              wall,
-		userCPU:           userCPU,
-		systemCPU:         systemCPU,
-		peakRSS:           rssStats.peak,
-		cacheBefore:       cacheBefore,
-		cacheAfter:        cacheAfter,
-		exitCode:          exitCode,
-		logPath:           logPath,
-		artifactPath:      artifact,
-		terminationReason: terminationReason,
-		args:              args,
-	}
-
-	if err := r.recordExecution(bin, workload, target, scenario, concurrency, iteration, cacheMode, purpose, &stats); err != nil {
-		return nil, err
+		startedAt:          startedAt,
+		wall:               wall,
+		userCPU:            userCPU,
+		systemCPU:          systemCPU,
+		peakRSS:            rssStats.peak,
+		exitCode:           exitCode,
+		terminationReason:  terminationReason,
+		cancellation:       cancellation,
+		survivingProcesses: survivingProcesses,
 	}
 
 	return &stats, nil
@@ -1475,29 +1867,33 @@ func (r *runner) recordExecution(
 	stats *executionStats,
 ) error {
 	record := result{
-		SchemaVersion:     schemaVersion,
-		Binary:            bin.Label,
-		Workload:          workload.Name,
-		WorkloadRevision:  workload.Revision,
-		Target:            target,
-		Scenario:          scenario.Name,
-		CacheMode:         cacheMode,
-		Concurrency:       concurrency,
-		Iteration:         iteration,
-		Purpose:           purpose,
-		StartedAt:         stats.startedAt,
-		WallNS:            stats.wall.Nanoseconds(),
-		UserCPUNS:         stats.userCPU.Nanoseconds(),
-		SystemCPUNS:       stats.systemCPU.Nanoseconds(),
-		PeakTreeRSSBytes:  stats.peakRSS,
-		CacheBytesBefore:  stats.cacheBefore,
-		CacheBytesAfter:   stats.cacheAfter,
-		ExitCode:          stats.exitCode,
-		LogPath:           relativePath(r.outDir, stats.logPath),
-		ArtifactPath:      relativePath(r.outDir, stats.artifactPath),
-		TerminationReason: stats.terminationReason,
-		Command:           append([]string{bin.Path}, stats.args...),
+		SchemaVersion:      schemaVersion,
+		Binary:             bin.Label,
+		Workload:           workload.Name,
+		WorkloadRevision:   workload.Revision,
+		Target:             target,
+		Scenario:           scenario.Name,
+		CacheMode:          cacheMode,
+		Concurrency:        concurrency,
+		Iteration:          iteration,
+		Purpose:            purpose,
+		StartedAt:          stats.startedAt,
+		WallNS:             stats.wall.Nanoseconds(),
+		UserCPUNS:          stats.userCPU.Nanoseconds(),
+		SystemCPUNS:        stats.systemCPU.Nanoseconds(),
+		PeakTreeRSSBytes:   stats.peakRSS,
+		CacheBytesBefore:   stats.cacheBefore,
+		CacheBytesAfter:    stats.cacheAfter,
+		ExitCode:           stats.exitCode,
+		LogPath:            relativePath(r.outDir, stats.logPath),
+		ArtifactPath:       relativePath(r.outDir, stats.artifactPath),
+		TerminationReason:  stats.terminationReason,
+		CancellationNS:     stats.cancellation.Nanoseconds(),
+		SurvivingProcesses: stats.survivingProcesses,
+		Command:            append([]string{bin.Path}, stats.args...),
 	}
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
 	if err := appendJSONLine(r.results, record); err != nil {
 		return err
 	}
@@ -1505,10 +1901,11 @@ func (r *runner) recordExecution(
 		bin.Label, workload.Name, safeName(target), scenario.Name, concurrency, cacheMode, purpose,
 		stats.wall.Round(time.Millisecond), stats.peakRSS/bytesPerMiB)
 
-	if stats.terminationReason != "" {
+	compatibilityRun := strings.HasPrefix(purpose, "compatibility")
+	if stats.terminationReason != "" && purpose != "compatibility-cancel" {
 		return fmt.Errorf("benchmark command stopped by %s; see %s", stats.terminationReason, stats.logPath)
 	}
-	if stats.exitCode != 0 && purpose != "compatibility" {
+	if stats.exitCode != 0 && !compatibilityRun {
 		return fmt.Errorf("benchmark command exited with %d; see %s", stats.exitCode, stats.logPath)
 	}
 
@@ -1522,12 +1919,20 @@ func buildRunArgs(
 	runTimeout time.Duration,
 	extra []string,
 ) ([]string, error) {
+	cliTimeout := runTimeout
+	if scenario.Mode == compatibilityModeTimeout {
+		cliTimeout = compatibilityCLITimeout
+	}
+	runnerMode := "--allow-serial-runners"
+	if scenario.Mode == compatibilityModeParallel {
+		runnerMode = "--allow-parallel-runners"
+	}
 	args := []string{
 		"--color=never",
 		"run",
 		"-v",
-		"--timeout=" + runTimeout.String(),
-		"--allow-serial-runners",
+		"--timeout=" + cliTimeout.String(),
+		runnerMode,
 		fmt.Sprintf("--fix=%t", scenario.Mutates),
 		fmt.Sprintf("--concurrency=%d", concurrency),
 	}
@@ -1613,31 +2018,59 @@ func (r *runner) newBenchmarkCommand(
 	}
 }
 
-func startCommand(ctx context.Context, cmd *exec.Cmd) (finished chan struct{}, rootPID int32, startErr error) {
+func startCommand(
+	ctx context.Context,
+	cmd *exec.Cmd,
+) (finished chan struct{}, terminated <-chan processTermination, rootPID int32, startErr error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, 0, fmt.Errorf("start benchmark command: %w", ctxErr)
+		return nil, nil, 0, fmt.Errorf("start benchmark command: %w", ctxErr)
 	}
+	configureProcessTree(cmd)
 	if cmdErr := cmd.Start(); cmdErr != nil {
-		return nil, 0, fmt.Errorf("start benchmark command: %w", cmdErr)
+		return nil, nil, 0, fmt.Errorf("start benchmark command: %w", cmdErr)
 	}
 	rootPID, startErr = checkedPID(cmd.Process.Pid)
 	if startErr != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 
-		return nil, 0, startErr
+		return nil, nil, 0, startErr
 	}
 
 	finished = make(chan struct{})
+	terminatedCh := make(chan processTermination, 1)
 	go func() {
 		select {
 		case <-ctx.Done():
-			killProcessTree(rootPID)
+			terminatedCh <- processTermination{pids: terminateProcessTree(rootPID)}
 		case <-finished:
+			pids := terminateProcessTree(rootPID)
+			terminatedCh <- processTermination{pids: pids, orphaned: len(pids)}
 		}
 	}()
 
-	return finished, rootPID, nil
+	return finished, terminatedCh, rootPID, nil
+}
+
+func scheduleCancellation(cancel context.CancelFunc, finished <-chan struct{}, delay time.Duration) <-chan time.Time {
+	result := make(chan time.Time, 1)
+	if delay <= 0 {
+		result <- time.Time{}
+		return result
+	}
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case started := <-timer.C:
+			cancel()
+			result <- started
+		case <-finished:
+			result <- time.Time{}
+		}
+	}()
+
+	return result
 }
 
 func checkedPID(pid int) (int32, error) {
@@ -1741,26 +2174,31 @@ func trackPeakTreeRSS(
 		defer close(resultCh)
 
 		var peak uint64
+		observed := make(map[int32]struct{})
 		ticker := time.NewTicker(rssSampleInterval)
 		defer ticker.Stop()
 
 		for {
-			current := processTreeRSS(ctx, rootPID, make(map[int32]struct{}))
+			seen := make(map[int32]struct{})
+			current := processTreeRSS(ctx, rootPID, seen)
+			for pid := range seen {
+				observed[pid] = struct{}{}
+			}
 			if current > peak {
 				peak = current
 			}
 			if current > maxRSS {
-				resultCh <- memoryStats{peak: peak, exceeded: true}
+				resultCh <- memoryStats{peak: peak, exceeded: true, observed: observed}
 				cancel()
 
 				return
 			}
 			select {
 			case <-ctx.Done():
-				resultCh <- memoryStats{peak: peak}
+				resultCh <- memoryStats{peak: peak, observed: observed}
 				return
 			case <-stop:
-				resultCh <- memoryStats{peak: peak}
+				resultCh <- memoryStats{peak: peak, observed: observed}
 				return
 			case <-ticker.C:
 			}
@@ -1770,16 +2208,31 @@ func trackPeakTreeRSS(
 	return resultCh
 }
 
-func killProcessTree(rootPID int32) {
-	p, err := process.NewProcess(rootPID)
-	if err != nil {
-		return
+func waitForProcessExit(pids map[int32]struct{}) int {
+	deadline := time.Now().Add(processExitWait)
+	for {
+		alive := countRunningProcesses(pids)
+		if alive == 0 || time.Now().After(deadline) {
+			return alive
+		}
+		time.Sleep(processExitPoll)
 	}
-	children, _ := p.Children()
-	for _, child := range children {
-		killProcessTree(child.Pid)
+}
+
+func countRunningProcesses(pids map[int32]struct{}) int {
+	count := 0
+	for pid := range pids {
+		p, err := process.NewProcess(pid)
+		if err != nil {
+			continue
+		}
+		running, err := p.IsRunning()
+		if err == nil && running {
+			count++
+		}
 	}
-	_ = p.Kill()
+
+	return count
 }
 
 func processTreeRSS(ctx context.Context, pid int32, seen map[int32]struct{}) uint64 {
@@ -1810,8 +2263,11 @@ func processTreeRSS(ctx context.Context, pid int32, seen map[int32]struct{}) uin
 
 func directorySize(root string) (int64, error) {
 	var total int64
-	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if path != root && errors.Is(walkErr, os.ErrNotExist) {
+				return nil
+			}
 			return walkErr
 		}
 		if entry.IsDir() {
@@ -1819,6 +2275,9 @@ func directorySize(root string) (int64, error) {
 		}
 		info, err := entry.Info()
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		total += info.Size()
