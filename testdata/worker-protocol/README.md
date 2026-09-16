@@ -17,9 +17,10 @@ Unicode scalar values; unpaired UTF-16 surrogate escapes are rejected.
 Canonical output escapes U+2028 and U+2029 as `\u2028` and `\u2029`.
 
 Controller messages are `hello`, `run`, `cancel`, and `shutdown`. Worker events
-are `ready`, `lifecycle`, `diagnostic`, `complete`, and `error`. Paths are UTF-8
-strings and durations are integer nanoseconds. The protocol deliberately omits
-live AST, type, package, analyzer, and suggested-fix objects.
+are `ready`, `lifecycle`, `diagnostic`, `complete`, `shutdown_ack`, and `error`.
+The worker emits `shutdown_ack` only after consuming `shutdown`. Paths are
+UTF-8 strings and durations are integer nanoseconds. The protocol deliberately
+omits live AST, type, package, analyzer, and suggested-fix objects.
 
 Stable decode error classes are `too_large`, `malformed_json`,
 `unsupported_version`, `unknown_kind`, `invalid_envelope`, `invalid_payload`,

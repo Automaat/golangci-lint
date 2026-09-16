@@ -11,6 +11,7 @@ import (
 	"github.com/mitchellh/go-homedir"
 	"github.com/spf13/viper"
 
+	"github.com/golangci/golangci-lint/v2/internal/processexit"
 	"github.com/golangci/golangci-lint/v2/pkg/exitcodes"
 	"github.com/golangci/golangci-lint/v2/pkg/fsutils"
 	"github.com/golangci/golangci-lint/v2/pkg/logutils"
@@ -180,7 +181,7 @@ func (l *BaseLoader) parseConfig() error {
 
 	if l.cfg.IsInternalTest() { // just for testing purposes: to detect config file usage
 		_, _ = fmt.Fprintln(logutils.StdOut, "test")
-		os.Exit(exitcodes.Success)
+		processexit.Exit(exitcodes.Success)
 	}
 
 	return nil

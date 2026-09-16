@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	base "log"
 	"os"
 	"os/exec"
 	"sync"
@@ -75,7 +74,7 @@ func startCacheProg(progAndArgs string, fuzzDirCache Cache) Cache {
 	}
 	args, err := quoted.Split(progAndArgs)
 	if err != nil {
-		base.Fatalf("%s args: %v", envGolangciLintCacheProg, err)
+		fatalf("%s args: %v", envGolangciLintCacheProg, err)
 	}
 	var prog string
 	if len(args) > 0 {
@@ -88,11 +87,11 @@ func startCacheProg(progAndArgs string, fuzzDirCache Cache) Cache {
 	cmd := exec.CommandContext(ctx, prog, args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
-		base.Fatalf("StdoutPipe to %s: envGolangciLintCacheProg, %v", envGolangciLintCacheProg, err)
+		fatalf("StdoutPipe to %s: envGolangciLintCacheProg, %v", envGolangciLintCacheProg, err)
 	}
 	in, err := cmd.StdinPipe()
 	if err != nil {
-		base.Fatalf("StdinPipe to %s: envGolangciLintCacheProg, %v", envGolangciLintCacheProg, err)
+		fatalf("StdinPipe to %s: envGolangciLintCacheProg, %v", envGolangciLintCacheProg, err)
 	}
 	cmd.Stderr = os.Stderr
 	// On close, we cancel the context. Rather than killing the helper,
@@ -100,7 +99,7 @@ func startCacheProg(progAndArgs string, fuzzDirCache Cache) Cache {
 	cmd.Cancel = in.Close
 
 	if err := cmd.Start(); err != nil {
-		base.Fatalf("error starting %s program %q: %v", envGolangciLintCacheProg, prog, err)
+		fatalf("error starting %s program %q: %v", envGolangciLintCacheProg, prog, err)
 	}
 
 	pc := &ProgCache{
@@ -138,7 +137,7 @@ func startCacheProg(progAndArgs string, fuzzDirCache Cache) Cache {
 				can[cmd] = true
 			}
 			if len(can) == 0 {
-				base.Fatalf("%s %v declared no supported commands", envGolangciLintCacheProg, prog)
+				fatalf("%s %v declared no supported commands", envGolangciLintCacheProg, prog)
 			}
 			pc.can = can
 			return pc
@@ -165,9 +164,9 @@ func (c *ProgCache) readLoop(readLoopDone chan<- struct{}) {
 				c.mu.Lock()
 				inFlight := len(c.inFlight)
 				c.mu.Unlock()
-				base.Fatalf("%s exited pre-Close with %v pending requests", envGolangciLintCacheProg, inFlight)
+				fatalf("%s exited pre-Close with %v pending requests", envGolangciLintCacheProg, inFlight)
 			}
-			base.Fatalf("error reading JSON from %s: %v", envGolangciLintCacheProg, err)
+			fatalf("error reading JSON from %s: %v", envGolangciLintCacheProg, err)
 		}
 		c.mu.Lock()
 		ch, ok := c.inFlight[res.ID]
@@ -176,7 +175,7 @@ func (c *ProgCache) readLoop(readLoopDone chan<- struct{}) {
 		if ok {
 			ch <- res
 		} else {
-			base.Fatalf("%s sent response for unknown request ID %v", envGolangciLintCacheProg, res.ID)
+			fatalf("%s sent response for unknown request ID %v", envGolangciLintCacheProg, res.ID)
 		}
 	}
 }

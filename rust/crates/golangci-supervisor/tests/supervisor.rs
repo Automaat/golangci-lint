@@ -1,7 +1,8 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
@@ -21,6 +22,13 @@ const TIMEOUT_ENV: &str = "GOLANGCI_SUPERVISOR_TIMEOUT_MS";
 const MAX_RSS_ENV: &str = "GOLANGCI_SUPERVISOR_MAX_RSS_BYTES";
 const REPORT_ENV: &str = "GOLANGCI_SUPERVISOR_REPORT";
 const POLL_ENV: &str = "GOLANGCI_SUPERVISOR_POLL_MS";
+const TRANSPORT_ENV: &str = "GOLANGCI_SUPERVISOR_TRANSPORT";
+const WORKER_ENDPOINT_ENV: &str = "GOLANGCI_WORKER_ENDPOINT";
+const WORKER_TOKEN_ENV: &str = "GOLANGCI_WORKER_TOKEN";
+const BAD_AUTH_ENV: &str = "GOLANGCI_FIXTURE_BAD_AUTH";
+const DECOY_ENV: &str = "GOLANGCI_FIXTURE_DECOY";
+const EARLY_EXIT_ENV: &str = "GOLANGCI_FIXTURE_EARLY_EXIT";
+const STOP_AFTER_READY_ENV: &str = "GOLANGCI_FIXTURE_STOP_AFTER_READY";
 const SUPERVISOR: &str = env!("CARGO_BIN_EXE_golangci-supervisor");
 const FIXTURE: &str = env!("CARGO_BIN_EXE_supervisor-fixture");
 
@@ -46,6 +54,219 @@ fn preserves_arguments_streams_and_exit_code() {
     let report = read_report(&report);
     assert_eq!(report["termination"], "exited");
     assert_eq!(report["child_exit_code"], 7);
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_transport_preserves_streams_and_exit_code() {
+    let direct_report = temp_path("worker-direct-report");
+    let direct = supervisor(&direct_report)
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+    let worker_report = temp_path("worker-transport-report");
+    let worker = worker_supervisor(&worker_report)
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+
+    assert_eq!(worker.status.code(), direct.status.code());
+    assert_eq!(worker.stdout, direct.stdout);
+    assert_eq!(worker.stderr, direct.stderr);
+    let report = read_report(&worker_report);
+    assert_eq!(report["termination"], "exited");
+    assert_eq!(report["child_exit_code"], 7);
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_transport_preserves_stdin() {
+    let direct_report = temp_path("worker-stdin-direct-report");
+    let direct = output_with_stdin(
+        supervisor(&direct_report).args(["run", "protocol-stdin"]),
+        b"from-stdin\n",
+    );
+    let worker_report = temp_path("worker-stdin-transport-report");
+    let worker = output_with_stdin(
+        worker_supervisor(&worker_report).args(["run", "protocol-stdin"]),
+        b"from-stdin\n",
+    );
+
+    assert_eq!(worker.status.code(), direct.status.code());
+    assert_eq!(worker.stdout, direct.stdout);
+    assert_eq!(worker.stderr, direct.stderr);
+    assert_eq!(worker.stdout, b"stdin:from-stdin\n");
+}
+
+#[test]
+fn worker_transport_rejects_invalid_sessions() {
+    for behavior in [
+        "protocol-malformed",
+        "protocol-close-before-shutdown",
+        "protocol-ignore-shutdown",
+        "protocol-missing-lifecycle",
+        "protocol-missing-complete",
+        "protocol-wrong-request",
+        "protocol-oversized",
+    ] {
+        let report_path = temp_path(behavior);
+        let output = worker_supervisor(&report_path)
+            .args(["run", behavior])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(126), "{behavior}");
+        let report = read_report(&report_path);
+        assert_eq!(report["termination"], "lifecycle_error", "{behavior}");
+        assert_eq!(report["surviving_descendants"], 0, "{behavior}");
+    }
+}
+
+#[test]
+fn worker_transport_authenticates_the_worker() {
+    let report_path = temp_path("worker-auth-report");
+    let output = worker_supervisor(&report_path)
+        .env(BAD_AUTH_ENV, "1")
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(126));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "lifecycle_error");
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_transport_rejects_unauthenticated_decoy() {
+    let report_path = temp_path("worker-decoy-report");
+    let output = worker_supervisor(&report_path)
+        .env(DECOY_ENV, "1")
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.stdout, b"stdout:protocol\n");
+    assert_eq!(output.stderr, b"stderr:protocol\n");
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "exited");
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_authentication_obeys_supervisor_timeout() {
+    let report_path = temp_path("worker-auth-timeout-report");
+    let started = Instant::now();
+    let output = worker_supervisor(&report_path)
+        .env(DECOY_ENV, "1")
+        .env(TIMEOUT_ENV, "10")
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(124));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "timeout");
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_control_remains_responsive_after_ready() {
+    let report_path = temp_path("worker-ready-timeout-report");
+    let started = Instant::now();
+    let output = worker_supervisor(&report_path)
+        .env(STOP_AFTER_READY_ENV, "1")
+        .env(TIMEOUT_ENV, "50")
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(124));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "timeout");
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_transport_rejects_early_exit() {
+    let report_path = temp_path("worker-early-exit-report");
+    let output = worker_supervisor(&report_path)
+        .env(EARLY_EXIT_ENV, "1")
+        .args(["run", "protocol-success"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(126));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "lifecycle_error");
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_timeout_kills_descendants() {
+    let report_path = temp_path("worker-timeout-report");
+    let pid_path = temp_path("worker-timeout-pid");
+    let mut child = worker_supervisor(&report_path)
+        .env(TIMEOUT_ENV, "1000")
+        .args(["run", "protocol-spawn-descendant", path_string(&pid_path)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    wait_for_file(&pid_path, Duration::from_secs(3));
+    let status = wait_for_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(124));
+    assert_process_gone(read_pid(&pid_path));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "timeout");
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_rss_limit_kills_process_tree() {
+    let report_path = temp_path("worker-rss-report");
+    let output = worker_supervisor(&report_path)
+        .env(TIMEOUT_ENV, "3000")
+        .env(MAX_RSS_ENV, (16 * 1024 * 1024).to_string())
+        .args(["run", "protocol-allocate"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(125));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "rss_limit");
+    assert!(report["peak_tree_rss_bytes"].as_u64().unwrap() > 16 * 1024 * 1024);
+    assert_eq!(report["surviving_descendants"], 0);
+}
+
+#[test]
+fn worker_interrupt_kills_descendants() {
+    let report_path = temp_path("worker-cancel-report");
+    let pid_path = temp_path("worker-cancel-pid");
+    let mut command = worker_supervisor(&report_path);
+    command
+        .env(TIMEOUT_ENV, "3000")
+        .args(["run", "protocol-spawn-descendant", path_string(&pid_path)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    let mut child = command.spawn().unwrap();
+
+    wait_for_file(&pid_path, Duration::from_secs(3));
+    request_interrupt(child.id());
+    let status = wait_for_exit(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(130));
+    assert_process_gone(read_pid(&pid_path));
+    let report = read_report(&report_path);
+    assert_eq!(report["termination"], "cancelled");
+    assert!(report["cancellation_latency_ms"].as_u64().unwrap() < 5_000);
     assert_eq!(report["surviving_descendants"], 0);
 }
 
@@ -157,7 +378,20 @@ fn supervisor(report: &Path) -> Command {
         .env(REPORT_ENV, report)
         .env(POLL_ENV, "5")
         .env_remove(TIMEOUT_ENV)
-        .env_remove(MAX_RSS_ENV);
+        .env_remove(MAX_RSS_ENV)
+        .env_remove(TRANSPORT_ENV)
+        .env_remove(WORKER_ENDPOINT_ENV)
+        .env_remove(WORKER_TOKEN_ENV)
+        .env_remove(BAD_AUTH_ENV)
+        .env_remove(DECOY_ENV)
+        .env_remove(EARLY_EXIT_ENV)
+        .env_remove(STOP_AFTER_READY_ENV);
+    command
+}
+
+fn worker_supervisor(report: &Path) -> Command {
+    let mut command = supervisor(report);
+    command.env(TRANSPORT_ENV, "worker");
     command
 }
 
@@ -173,6 +407,18 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> ExitStatus {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn output_with_stdin(command: &mut Command, input: &[u8]) -> Output {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+
+    child.wait_with_output().unwrap()
 }
 
 fn wait_for_file(path: &Path, timeout: Duration) {

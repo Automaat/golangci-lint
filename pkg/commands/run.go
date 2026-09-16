@@ -103,15 +103,31 @@ type runCommand struct {
 	flock *flock.Flock
 
 	exitCode int
+	exitFn   func(int)
+}
+
+type runCommandOptions struct {
+	lifecycleReportPath string
+	lifecycleRecorder   *lifecycle.Recorder
+	exitFn              func(int)
 }
 
 func newRunCommand(logger logutils.Log, info BuildInfo) *runCommand {
-	reportData := &report.Data{}
 	lifecycleReportPath := os.Getenv(lifecycle.EnvReportPath)
 	var lifecycleRecorder *lifecycle.Recorder
 	if lifecycleReportPath != "" {
 		lifecycleRecorder = lifecycle.NewRecorder()
 	}
+
+	return newRunCommandWithOptions(logger, info, runCommandOptions{
+		lifecycleReportPath: lifecycleReportPath,
+		lifecycleRecorder:   lifecycleRecorder,
+		exitFn:              os.Exit,
+	})
+}
+
+func newRunCommandWithOptions(logger logutils.Log, info BuildInfo, options runCommandOptions) *runCommand {
+	reportData := &report.Data{}
 
 	c := &runCommand{
 		viper:               viper.New(),
@@ -120,8 +136,9 @@ func newRunCommand(logger logutils.Log, info BuildInfo) *runCommand {
 		cfg:                 config.NewDefault(),
 		reportData:          reportData,
 		buildInfo:           info,
-		lifecycleReportPath: lifecycleReportPath,
-		lifecycleRecorder:   lifecycleRecorder,
+		lifecycleReportPath: options.lifecycleReportPath,
+		lifecycleRecorder:   options.lifecycleRecorder,
+		exitFn:              options.exitFn,
 	}
 
 	runCmd := &cobra.Command{
@@ -201,7 +218,9 @@ func (c *runCommand) persistentPostRunE(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	os.Exit(c.exitCode)
+	if c.exitFn != nil {
+		c.exitFn(c.exitCode)
+	}
 
 	return nil
 }
@@ -267,7 +286,7 @@ func (c *runCommand) postRun(_ *cobra.Command, _ []string) {
 	c.releaseFileLock()
 }
 
-func (c *runCommand) execute(_ *cobra.Command, _ []string) {
+func (c *runCommand) execute(cmd *cobra.Command, _ []string) {
 	needTrackResources := logutils.IsVerbose() || c.opts.PrintResourcesUsage
 
 	trackResourcesEndCh := make(chan struct{})
@@ -280,7 +299,7 @@ func (c *runCommand) execute(_ *cobra.Command, _ []string) {
 		}
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(cmd.Context())
 	if c.cfg.Run.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, c.cfg.Run.Timeout)
 	}

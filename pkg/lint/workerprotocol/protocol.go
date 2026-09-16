@@ -24,15 +24,16 @@ const (
 type Kind string
 
 const (
-	KindHello      Kind = "hello"
-	KindReady      Kind = "ready"
-	KindRun        Kind = "run"
-	KindCancel     Kind = "cancel"
-	KindShutdown   Kind = "shutdown"
-	KindLifecycle  Kind = "lifecycle"
-	KindDiagnostic Kind = "diagnostic"
-	KindComplete   Kind = "complete"
-	KindError      Kind = "error"
+	KindHello       Kind = "hello"
+	KindReady       Kind = "ready"
+	KindRun         Kind = "run"
+	KindCancel      Kind = "cancel"
+	KindShutdown    Kind = "shutdown"
+	KindShutdownAck Kind = "shutdown_ack"
+	KindLifecycle   Kind = "lifecycle"
+	KindDiagnostic  Kind = "diagnostic"
+	KindComplete    Kind = "complete"
+	KindError       Kind = "error"
 )
 
 // ErrorClass is a stable decode failure category.
@@ -597,6 +598,9 @@ func validateWorkerPayload(envelope Envelope) error {
 		if payload.Worker == "" || len(payload.Capabilities) == 0 {
 			return protocolError(ErrorInvalidPayload, "ready requires worker and capabilities")
 		}
+	case KindShutdownAck:
+		_, err := DecodePayload[ShutdownPayload](envelope)
+		return err
 	case KindLifecycle:
 		return validateLifecycle(envelope)
 	case KindDiagnostic:
@@ -674,7 +678,7 @@ func validateComplete(envelope Envelope) error {
 
 func (k Kind) valid() bool {
 	switch k {
-	case KindHello, KindReady, KindRun, KindCancel, KindShutdown,
+	case KindHello, KindReady, KindRun, KindCancel, KindShutdown, KindShutdownAck,
 		KindLifecycle, KindDiagnostic, KindComplete, KindError:
 		return true
 	default:
@@ -693,7 +697,7 @@ func (k Kind) runScoped() bool {
 
 func (k Kind) isWorkerEvent() bool {
 	switch k {
-	case KindReady, KindLifecycle, KindDiagnostic, KindComplete, KindError:
+	case KindReady, KindShutdownAck, KindLifecycle, KindDiagnostic, KindComplete, KindError:
 		return true
 	default:
 		return false
