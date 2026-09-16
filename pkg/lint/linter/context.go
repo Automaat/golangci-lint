@@ -8,6 +8,7 @@ import (
 	"github.com/golangci/golangci-lint/v2/internal/cache"
 	"github.com/golangci/golangci-lint/v2/pkg/config"
 	"github.com/golangci/golangci-lint/v2/pkg/goanalysis/load"
+	"github.com/golangci/golangci-lint/v2/pkg/lint/lifecycle"
 	"github.com/golangci/golangci-lint/v2/pkg/logutils"
 )
 
@@ -24,6 +25,7 @@ type Context struct {
 
 	PkgCache  *cache.Cache
 	LoadGuard *load.Guard
+	Lifecycle *lifecycle.Recorder
 }
 
 func (c *Context) Settings() *config.LintersSettings {

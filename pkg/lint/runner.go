@@ -7,6 +7,7 @@ import (
 	"maps"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/golangci/golangci-lint/v2/internal/errorutil"
 	"github.com/golangci/golangci-lint/v2/pkg/config"
@@ -26,6 +27,21 @@ type processorStat struct {
 	outCount int
 }
 
+// AnalysisRunner runs configured linters against a loaded context.
+type AnalysisRunner interface {
+	Run(context.Context, []*linter.Config) ([]*result.Issue, error)
+}
+
+// RunnerFactory builds analysis runners after packages are loaded.
+type RunnerFactory struct {
+	log       logutils.Log
+	cfg       *config.Config
+	goenv     *goutil.Env
+	lineCache *fsutils.LineCache
+	fileCache *fsutils.FileCache
+	dbManager *lintersdb.Manager
+}
+
 type Runner struct {
 	Log logutils.Log
 
@@ -33,6 +49,27 @@ type Runner struct {
 	Processors []processors.Processor
 }
 
+// NewRunnerFactory captures runner dependencies for deferred construction.
+func NewRunnerFactory(log logutils.Log, cfg *config.Config, goenv *goutil.Env,
+	lineCache *fsutils.LineCache, fileCache *fsutils.FileCache,
+	dbManager *lintersdb.Manager,
+) *RunnerFactory {
+	return &RunnerFactory{
+		log:       log,
+		cfg:       cfg,
+		goenv:     goenv,
+		lineCache: lineCache,
+		fileCache: fileCache,
+		dbManager: dbManager,
+	}
+}
+
+// Build constructs a runner for a loaded lint context.
+func (f *RunnerFactory) Build(lintCtx *linter.Context) (AnalysisRunner, error) {
+	return NewRunner(f.log, f.cfg, f.goenv, f.lineCache, f.fileCache, f.dbManager, lintCtx)
+}
+
+// NewRunner constructs the Go analysis runner.
 func NewRunner(log logutils.Log, cfg *config.Config, goenv *goutil.Env,
 	lineCache *fsutils.LineCache, fileCache *fsutils.FileCache,
 	dbManager *lintersdb.Manager, lintCtx *linter.Context,
@@ -137,9 +174,17 @@ func (r *Runner) Run(ctx context.Context, linters []*linter.Config) ([]*result.I
 	)
 
 	for _, lc := range linters {
+		var started time.Time
+		if r.lintCtx.Lifecycle != nil {
+			started = time.Now()
+		}
+
 		linterIssues, err := timeutils.TrackStage(sw, lc.Name(), func() ([]*result.Issue, error) {
 			return r.runLinterSafe(ctx, r.lintCtx, lc)
 		})
+		if r.lintCtx.Lifecycle != nil {
+			r.lintCtx.Lifecycle.RecordLinter(lc.Name(), time.Since(started), len(linterIssues), err)
+		}
 		if err != nil {
 			lintErrors = errors.Join(lintErrors, fmt.Errorf("can't run linter %s", lc.Linter.Name()), err)
 			r.Log.Warnf("Can't run linter %s: %v", lc.Linter.Name(), err)
@@ -195,6 +240,11 @@ func (r *Runner) runLinterSafe(ctx context.Context, lintCtx *linter.Context,
 }
 
 func (r *Runner) processLintResults(inIssues []*result.Issue) []*result.Issue {
+	var started time.Time
+	if r.lintCtx.Lifecycle != nil {
+		started = time.Now()
+	}
+
 	sw := timeutils.NewStopwatch("processing", r.Log)
 
 	var issuesBefore, issuesAfter int
@@ -218,9 +268,14 @@ func (r *Runner) processLintResults(inIssues []*result.Issue) []*result.Issue {
 	}
 	r.printPerProcessorStat(statPerProcessor)
 	sw.PrintStages()
+	if r.lintCtx.Lifecycle != nil {
+		r.lintCtx.Lifecycle.RecordProcessing(time.Since(started), issuesBefore, issuesAfter)
+	}
 
 	return outIssues
 }
+
+var _ AnalysisRunner = (*Runner)(nil)
 
 func (r *Runner) printPerProcessorStat(stat map[string]processorStat) {
 	parts := make([]string, 0, len(stat))

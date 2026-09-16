@@ -35,6 +35,19 @@ func (MetaLinter) Name() string {
 	return "goanalysis_metalinter"
 }
 
+func (ml MetaLinter) getLinterNames() []string {
+	names := make([]string, 0, len(ml.linters))
+	for _, lnt := range ml.linters {
+		names = append(names, lnt.Name())
+	}
+
+	return names
+}
+
+func (ml MetaLinter) getLinterNameForAnalyzer(analyzer *analysis.Analyzer) string {
+	return ml.analyzerToLinterName[analyzer]
+}
+
 func (MetaLinter) Desc() string {
 	return ""
 }
