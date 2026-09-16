@@ -46,6 +46,8 @@ type action struct {
 	runner              *runner
 	loadCachedFactsDone bool
 	loadCachedFactsOk   bool
+	cachedFactsApplied  bool
+	cachedFacts         []Fact
 	isInitialPkg        bool
 	needAnalyzeSource   bool
 }
