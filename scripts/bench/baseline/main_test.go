@@ -82,7 +82,8 @@ func TestParseOptionsSafetyDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if opts.RunTimeout != defaultRunTimeout || opts.MaxRSSMiB != defaultMaxRSSMiB ||
-		opts.GoMaxProcs != defaultGoMaxProcs || opts.Nice != defaultNice {
+		opts.GoMaxProcs != defaultGoMaxProcs || opts.Nice != defaultNice ||
+		opts.BinaryOrder != binaryOrderForkFirst {
 		t.Fatalf("unexpected safety defaults: %+v", opts)
 	}
 }
@@ -93,10 +94,28 @@ func TestParseOptionsRejectsUnsafeLimits(t *testing.T) {
 		{"--fork-bin", "fork", "--max-rss-mib", "0"},
 		{"--fork-bin", "fork", "--go-max-procs", "0"},
 		{"--fork-bin", "fork", "--nice", "21"},
+		{"--fork-bin", "fork", "--binary-order", "unknown"},
 	} {
 		if _, err := parseOptions(args); err == nil {
 			t.Fatalf("expected %v to fail", args)
 		}
+	}
+}
+
+func TestConfiguredBinariesPreservesLabelsWhenReversed(t *testing.T) {
+	opts := &options{
+		ForkBin:     "candidate",
+		UpstreamBin: "baseline",
+		BinaryOrder: binaryOrderUpstreamFirst,
+	}
+
+	actual := configuredBinaries(opts)
+	expected := []binary{
+		{Label: upstreamLabel, Path: "baseline"},
+		{Label: forkLabel, Path: "candidate"},
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("expected %v, got %v", expected, actual)
 	}
 }
 

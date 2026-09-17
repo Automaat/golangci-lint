@@ -11,7 +11,8 @@ func TestParseOptionsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.CandidateRef != "HEAD" || opts.UpstreamRef != "upstream/main" || opts.OutputDir != "dist/bench/bin" {
+	if opts.CandidateRef != "HEAD" || opts.UpstreamRef != "upstream/main" ||
+		opts.BaselineMode != baselineModeMergeBase || opts.OutputDir != "dist/bench/bin" {
 		t.Fatalf("unexpected refs or output: %+v", opts)
 	}
 	if opts.BuildTimeout != defaultBuildTimeout || opts.MaxMemoryMiB != defaultMaxMemoryMiB ||
@@ -26,6 +27,7 @@ func TestParseOptionsRejectsUnsafeLimits(t *testing.T) {
 		{"--max-memory-mib", "0"},
 		{"--go-max-procs", "0"},
 		{"--nice", "21"},
+		{"--baseline-mode", "unknown"},
 	} {
 		if _, err := parseOptions(args); err == nil {
 			t.Fatalf("expected %v to fail", args)
@@ -37,6 +39,7 @@ func TestParseOptionsOverrides(t *testing.T) {
 	opts, err := parseOptions([]string{
 		"--candidate-ref", "feature",
 		"--upstream-ref", "origin/main",
+		"--baseline-mode", "exact",
 		"--out-dir", "artifacts",
 		"--build-timeout", "1m",
 		"--max-memory-mib", "512",
@@ -46,9 +49,19 @@ func TestParseOptionsOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.CandidateRef != "feature" || opts.UpstreamRef != "origin/main" || opts.OutputDir != "artifacts" ||
+	if opts.CandidateRef != "feature" || opts.UpstreamRef != "origin/main" ||
+		opts.BaselineMode != baselineModeExact || opts.OutputDir != "artifacts" ||
 		opts.BuildTimeout != time.Minute || opts.MaxMemoryMiB != 512 || opts.GoMaxProcs != 1 || opts.Nice != 5 {
 		t.Fatalf("unexpected options: %+v", opts)
+	}
+}
+
+func TestSelectBaselineSHA(t *testing.T) {
+	if actual := selectBaselineSHA(baselineModeMergeBase, "merge", "upstream"); actual != "merge" {
+		t.Fatalf("expected merge base, got %q", actual)
+	}
+	if actual := selectBaselineSHA(baselineModeExact, "merge", "upstream"); actual != "upstream" {
+		t.Fatalf("expected exact upstream, got %q", actual)
 	}
 }
 

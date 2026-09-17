@@ -34,6 +34,14 @@ Run a quick smoke benchmark:
 make bench_baseline BENCH_ARGS='--workload small --scenario goanalysis --concurrency 1 --runs 1'
 ```
 
+When local host load makes wall-time measurements unreliable, run the manual
+`Performance benchmark` GitHub Actions workflow. It builds explicit candidate
+and baseline refs, runs seven cold samples in both binary orders under two CPUs
+and a 1 GiB limit, and uploads raw results plus optional CPU, heap, and trace
+profiles. Binary labels remain stable when the execution order reverses. The
+workflow builds the exact requested baseline ref; the default refs compare the
+checked-out commit with its parent.
+
 The manifest includes focused `govet`, `staticcheck`, `unused`, and
 `staticcheck-unused` scenarios. Compare them with the combined `goanalysis`
 scenario to isolate fact-cache and shared-IR costs:
