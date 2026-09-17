@@ -690,7 +690,9 @@ func computeConfigSalt(cfg *config.Config) ([]byte, error) {
 
 	configData := bytes.NewBufferString("linters.settings=")
 	configData.Write(lintersSettingsBytes)
-	configData.WriteString("\nbuild-tags=%s" + strings.Join(cfg.Run.BuildTags, ","))
+	buildTags := slices.Clone(cfg.Run.BuildTags)
+	slices.Sort(buildTags)
+	configData.WriteString("\nbuild-tags=" + strings.Join(buildTags, ","))
 
 	h := sha256.New()
 	if _, err := h.Write(configData.Bytes()); err != nil {
