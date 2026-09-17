@@ -1,0 +1,28 @@
+name: Validate cache salt
+
+on:
+  pull_request:
+    paths:
+      - pkg/commands/run.go
+      - pkg/commands/run_test.go
+      - .github/workflows/validate-cache-salt.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container:
+      image: golang:1.26
+      options: --cpus 2 --memory 1g --memory-swap 1g
+    env:
+      GOMAXPROCS: 2
+      GOMEMLIMIT: 700MiB
+      GOFLAGS: -p=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: go test ./pkg/commands -run '^TestComputeConfigSaltBuildTags$' -count=1
