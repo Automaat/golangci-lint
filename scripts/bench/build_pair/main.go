@@ -21,20 +21,23 @@ import (
 )
 
 const (
-	schemaVersion        = 1
-	defaultBuildTimeout  = 5 * time.Minute
-	defaultMaxMemoryMiB  = 1024
-	defaultGoMaxProcs    = 2
-	defaultNice          = 10
-	privateDirMode       = 0o750
-	privateFileMode      = 0o600
-	bytesPerMiB          = 1024 * 1024
-	shortCommitSHALength = 12
+	schemaVersion         = 2
+	defaultBuildTimeout   = 5 * time.Minute
+	defaultMaxMemoryMiB   = 1024
+	defaultGoMaxProcs     = 2
+	defaultNice           = 10
+	privateDirMode        = 0o750
+	privateFileMode       = 0o600
+	bytesPerMiB           = 1024 * 1024
+	shortCommitSHALength  = 12
+	baselineModeMergeBase = "merge-base"
+	baselineModeExact     = "exact"
 )
 
 type options struct {
 	CandidateRef string
 	UpstreamRef  string
+	BaselineMode string
 	OutputDir    string
 	BuildTimeout time.Duration
 	MaxMemoryMiB uint64
@@ -52,6 +55,8 @@ type metadata struct {
 	UpstreamRef   string           `json:"upstream_ref"`
 	UpstreamSHA   string           `json:"upstream_sha"`
 	MergeBaseSHA  string           `json:"merge_base_sha"`
+	BaselineMode  string           `json:"baseline_mode"`
+	BaselineSHA   string           `json:"baseline_sha"`
 	Limits        limitsMetadata   `json:"limits"`
 	Binaries      []binaryMetadata `json:"binaries"`
 }
@@ -122,7 +127,8 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
-	pairs, err := prepareBuildTargets(ctx, repository, outputDir, mergeBaseSHA, candidateSHA)
+	baselineSHA := selectBaselineSHA(opts.BaselineMode, mergeBaseSHA, upstreamSHA)
+	pairs, err := prepareBuildTargets(ctx, repository, outputDir, baselineSHA, candidateSHA)
 	if err != nil {
 		return err
 	}
@@ -136,6 +142,8 @@ func run(ctx context.Context, args []string) error {
 		UpstreamRef:   opts.UpstreamRef,
 		UpstreamSHA:   upstreamSHA,
 		MergeBaseSHA:  mergeBaseSHA,
+		BaselineMode:  opts.BaselineMode,
+		BaselineSHA:   baselineSHA,
 		Limits: limitsMetadata{
 			BuildTimeoutNS:       opts.BuildTimeout.Nanoseconds(),
 			MaxMemoryBytes:       opts.MaxMemoryMiB * bytesPerMiB,
@@ -165,10 +173,17 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	_, _ = fmt.Fprintf(os.Stdout, "benchmark pair: upstream %s, fork %s\n",
-		mergeBaseSHA[:shortCommitSHALength], candidateSHA[:shortCommitSHALength])
+		baselineSHA[:shortCommitSHALength], candidateSHA[:shortCommitSHALength])
 	_, _ = fmt.Fprintf(os.Stdout, "pair artifacts: %s\n", outputDir)
 
 	return nil
+}
+
+func selectBaselineSHA(mode, mergeBaseSHA, upstreamSHA string) string {
+	if mode == baselineModeExact {
+		return upstreamSHA
+	}
+	return mergeBaseSHA
 }
 
 func parseOptions(args []string) (options, error) {
@@ -178,6 +193,8 @@ func parseOptions(args []string) (options, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.CandidateRef, "candidate-ref", "HEAD", "candidate Git ref")
 	fs.StringVar(&opts.UpstreamRef, "upstream-ref", "upstream/main", "upstream Git ref")
+	fs.StringVar(&opts.BaselineMode, "baseline-mode", baselineModeMergeBase,
+		"baseline commit: merge-base or exact upstream ref")
 	fs.StringVar(&opts.OutputDir, "out-dir", "dist/bench/bin", "binary and metadata output directory")
 	fs.DurationVar(&opts.BuildTimeout, "build-timeout", defaultBuildTimeout, "hard timeout for each build")
 	fs.Uint64Var(&opts.MaxMemoryMiB, "max-memory-mib", defaultMaxMemoryMiB, "Go build memory limit")
@@ -202,6 +219,9 @@ func validateOptions(opts *options) error {
 	}
 	if opts.UpstreamRef == "" {
 		return errors.New("--upstream-ref is required")
+	}
+	if opts.BaselineMode != baselineModeMergeBase && opts.BaselineMode != baselineModeExact {
+		return fmt.Errorf("invalid --baseline-mode %q", opts.BaselineMode)
 	}
 	if opts.OutputDir == "" {
 		return errors.New("--out-dir is required")

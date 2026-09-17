@@ -48,6 +48,8 @@ const (
 	parentDirectory             = ".."
 	forkLabel                   = "fork"
 	upstreamLabel               = "upstream"
+	binaryOrderForkFirst        = "fork-first"
+	binaryOrderUpstreamFirst    = "upstream-first"
 	compatibilityModeTimeout    = "timeout"
 	compatibilityModeCancel     = "cancel"
 	compatibilityModeParallel   = "parallel"
@@ -102,6 +104,7 @@ type options struct {
 	Scenario           string
 	Concurrency        string
 	CacheMode          string
+	BinaryOrder        string
 	Runs               int
 	Profiles           bool
 	Compatibility      bool
@@ -397,6 +400,8 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.Scenario, "scenario", "", "scenario name filter")
 	fs.StringVar(&opts.Concurrency, "concurrency", "", "comma-separated concurrency values")
 	fs.StringVar(&opts.CacheMode, "cache-mode", "cold,warm", "cold, warm, or both")
+	fs.StringVar(&opts.BinaryOrder, "binary-order", binaryOrderForkFirst,
+		"timing order: fork-first or upstream-first")
 	fs.IntVar(&opts.Runs, "runs", 0, "runs per case; manifest value by default")
 	fs.BoolVar(&opts.Profiles, "profiles", false, "capture separate CPU, heap, and trace profiles")
 	fs.BoolVar(&opts.Compatibility, "compatibility", false, "compare diagnostics from fork and upstream binaries")
@@ -446,6 +451,9 @@ func validateOptions(opts *options) error {
 	}
 	if _, err := parseCacheModes(opts.CacheMode); err != nil {
 		return err
+	}
+	if opts.BinaryOrder != binaryOrderForkFirst && opts.BinaryOrder != binaryOrderUpstreamFirst {
+		return fmt.Errorf("invalid binary order %q", opts.BinaryOrder)
 	}
 
 	return validateCompatibilityOptions(opts)
@@ -690,7 +698,7 @@ func parseCacheModes(raw string) ([]string, error) {
 
 func prepareBinaries(opts *options) ([]binary, error) {
 	var binaries []binary
-	for _, item := range []binary{{Label: forkLabel, Path: opts.ForkBin}, {Label: upstreamLabel, Path: opts.UpstreamBin}} {
+	for _, item := range configuredBinaries(opts) {
 		if item.Path == "" {
 			continue
 		}
@@ -710,6 +718,15 @@ func prepareBinaries(opts *options) ([]binary, error) {
 	}
 
 	return binaries, nil
+}
+
+func configuredBinaries(opts *options) []binary {
+	fork := binary{Label: forkLabel, Path: opts.ForkBin}
+	upstream := binary{Label: upstreamLabel, Path: opts.UpstreamBin}
+	if opts.BinaryOrder == binaryOrderUpstreamFirst {
+		return []binary{upstream, fork}
+	}
+	return []binary{fork, upstream}
 }
 
 func prepareOutputDir(path string) (string, error) {

@@ -1,0 +1,126 @@
+name: Performance benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Candidate git ref
+        required: true
+        default: HEAD
+        type: string
+      baseline_ref:
+        description: Baseline git ref
+        required: true
+        default: HEAD^
+        type: string
+      workload:
+        description: Workload
+        required: true
+        default: small
+        type: choice
+        options:
+          - small
+          - large
+      scenario:
+        description: Scenario
+        required: true
+        default: goanalysis
+        type: choice
+        options:
+          - goanalysis
+          - staticcheck-unused
+      capture_profiles:
+        description: Capture CPU, heap, and trace profiles
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    if: github.repository == 'Automaat/golangci-lint'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GOMAXPROCS: 2
+      GOMEMLIMIT: 1024MiB
+      GOFLAGS: -p=2
+      CANDIDATE_REF: ${{ inputs.candidate_ref }}
+      BASELINE_REF: ${{ inputs.baseline_ref }}
+      WORKLOAD: ${{ inputs.workload }}
+      SCENARIO: ${{ inputs.scenario }}
+      CAPTURE_PROFILES: ${{ inputs.capture_profiles }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.0
+          cache: false
+
+      - name: Build candidate and baseline
+        run: |
+          go run ./scripts/bench/build_pair \
+            --candidate-ref "$CANDIDATE_REF" \
+            --upstream-ref "$BASELINE_REF" \
+            --baseline-mode exact \
+            --out-dir dist/bench/bin \
+            --build-timeout 5m \
+            --max-memory-mib 1024 \
+            --go-max-procs 2 \
+            --nice 10
+
+      - name: Benchmark both binary orders
+        shell: bash
+        run: |
+          profile_args=()
+          if [[ "$CAPTURE_PROFILES" == "true" ]]; then
+            profile_args+=(--profiles)
+          fi
+
+          common_args=(
+            --manifest scripts/bench/baseline.json
+            --workload "$WORKLOAD"
+            --scenario "$SCENARIO"
+            --concurrency 2
+            --profile-concurrency 2
+            --cache-mode cold
+            --runs 7
+            --run-timeout 2m
+            --max-rss-mib 1024
+            --go-max-procs 2
+            --nice 10
+          )
+
+          go run ./scripts/bench/baseline \
+            --fork-bin dist/bench/bin/fork \
+            --upstream-bin dist/bench/bin/upstream \
+            --out dist/bench/hosted/candidate-first \
+            "${common_args[@]}" "${profile_args[@]}"
+
+          go run ./scripts/bench/baseline \
+            --fork-bin dist/bench/bin/fork \
+            --upstream-bin dist/bench/bin/upstream \
+            --binary-order upstream-first \
+            --out dist/bench/hosted/baseline-first \
+            "${common_args[@]}"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: performance-${{ inputs.workload }}-${{ inputs.scenario }}
+          path: |
+            dist/bench/bin/pair.json
+            dist/bench/hosted
+          if-no-files-found: error
+          retention-days: 14
