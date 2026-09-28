@@ -242,4 +242,4 @@ require (
 
 replace golang.org/x/tools => github.com/Automaat/tools v0.50.0-automaat.1
 
-replace honnef.co/go/tools => github.com/Automaat/go-tools v0.8.1-automaat.1
+replace honnef.co/go/tools => github.com/Automaat/go-tools v0.8.1-automaat.2

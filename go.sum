@@ -61,8 +61,8 @@ github.com/Antonboom/nilnil v1.1.2 h1:aNlFuJhaEseXe4fHO3xbjXlSeEiQVYa2lEkWD2s2hA
 github.com/Antonboom/nilnil v1.1.2/go.mod h1:0ynwvphOLmAuMwTNDyBnDZmSwZoDpcFXmUHmzoHH2WA=
 github.com/Antonboom/testifylint v1.6.4 h1:gs9fUEy+egzxkEbq9P4cpcMB6/G0DYdMeiFS87UiqmQ=
 github.com/Antonboom/testifylint v1.6.4/go.mod h1:YO33FROXX2OoUfwjz8g+gUxQXio5i9qpVy7nXGbxDD4=
-github.com/Automaat/go-tools v0.8.1-automaat.1 h1:kbRYmOvcxdHGvJydup47BvN64hrpXD9hUnsX4SfGjOI=
-github.com/Automaat/go-tools v0.8.1-automaat.1/go.mod h1:XA+OnlRA9EDh/ukGvXMNSZNKGwFQJ+5dER0ioUkOxks=
+github.com/Automaat/go-tools v0.8.1-automaat.2 h1:llwXUyk1IEAV1topw9Q6q1NKxxhEFPJFM0ZH7IGcASg=
+github.com/Automaat/go-tools v0.8.1-automaat.2/go.mod h1:XA+OnlRA9EDh/ukGvXMNSZNKGwFQJ+5dER0ioUkOxks=
 github.com/Automaat/tools v0.50.0-automaat.1 h1:/NnZm42I67mhseUEKAQKOF/iJA1pVq5tCRJ8AQWsqMs=
 github.com/Automaat/tools v0.50.0-automaat.1/go.mod h1:7ulVMw3831Mwi5EZD6RomGyffr4VFjuNYXf2BbCEAV0=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
