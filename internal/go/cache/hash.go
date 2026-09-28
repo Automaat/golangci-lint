@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash"
-	"io"
 	"os"
 	"strings"
 	"sync"
@@ -167,7 +166,7 @@ func FileHash(file string) ([HashSize]byte, error) {
 		}
 		return [HashSize]byte{}, err
 	}
-	_, err = io.Copy(h, f)
+	_, err = copyFile(h, f)
 	f.Close()
 	if err != nil {
 		if debugHash {
