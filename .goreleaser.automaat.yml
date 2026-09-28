@@ -1,0 +1,50 @@
+version: 2
+
+# Automaat fork release: GitHub assets only, named like upstream so
+# installers keyed on "<name>-<version>-<os>-<arch>" keep working.
+project_name: golangci-lint
+
+builds:
+  - binary: golangci-lint
+    main: ./cmd/golangci-lint/
+    flags:
+      - -trimpath
+    ldflags: -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [ 'tar.gz' ]
+    wrap_in_directory: true
+    format_overrides:
+      - goos: windows
+        formats: [ 'zip' ]
+    name_template: '{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}'
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: '{{ .ProjectName }}-{{ .Version }}-checksums.txt'
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: Automaat
+    name: golangci-lint
+  # Fork tags are semver pre-releases (vX.Y.Z-automaat.N); installers skip
+  # pre-releases when resolving "latest".
+  prerelease: 'false'
+  make_latest: 'true'
+  header: |
+    Automaat fork of golangci-lint {{ .Tag }}. Built against patched
+    `golang.org/x/tools` and `honnef.co/go/tools`; see `go version -m`.

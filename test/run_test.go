@@ -140,6 +140,10 @@ func TestTestsAreLintedByDefault(t *testing.T) {
 		ExpectHasIssue("don't use `init` function")
 }
 
+// The fork's root go.mod replaces x/tools and go-tools, which gomoddirectives
+// reports for every testdata package linted with --default=all.
+const disableForkGoModReplace = "--disable=gomoddirectives"
+
 func TestCgoOk(t *testing.T) {
 	testshared.NewRunnerBuilder(t).
 		WithNoConfig().
@@ -147,6 +151,7 @@ func TestCgoOk(t *testing.T) {
 			"--timeout=3m",
 			"--show-stats=false",
 			"--default=all",
+			disableForkGoModReplace,
 		).
 		WithTargetPath(testdataDir, "cgo").
 		Runner().
@@ -361,6 +366,7 @@ linters:
 		WithArgs(
 			"--show-stats=false",
 			"--default=all",
+			disableForkGoModReplace,
 		).
 		WithTargetPath(testdataDir, "unsafe").
 		WithBinPath(binPath).
@@ -463,7 +469,7 @@ func TestEnableAllFastAndEnableCanCoexist(t *testing.T) {
 		},
 		{
 			desc:     "all",
-			args:     []string{"--default=all", "--enable=typecheck"},
+			args:     []string{"--default=all", "--enable=typecheck", disableForkGoModReplace},
 			expected: []int{exitcodes.Success},
 		},
 	}
