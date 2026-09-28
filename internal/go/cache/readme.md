@@ -9,6 +9,7 @@ The main modifications are:
 - The name of the env vars:
   - `GOCACHE` -> `GOLANGCI_LINT_CACHE`
   - `GOCACHEPROG` -> `GOLANGCI_LINT_CACHEPROG` 
+- `FileHash` copies files through a pooled buffer (`copyFile`).
 
 ## History
 
