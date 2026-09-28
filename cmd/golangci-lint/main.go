@@ -22,6 +22,10 @@ var (
 )
 
 func main() {
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(200)
+	}
+
 	info := createBuildInfo()
 	if handled, exitCode, err := commands.TryExecuteWorker(info); handled {
 		if err != nil {
