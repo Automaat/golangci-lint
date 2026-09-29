@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -140,6 +141,9 @@ func runNarrowing(t *testing.T, binPath, dir string, analyzeAll bool) narrowingR
 }
 
 func TestDiffNarrowingMatchesFullAnalysis(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("diff modes depend on git line endings and path handling that are not exercised on Windows")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is required")
 	}
