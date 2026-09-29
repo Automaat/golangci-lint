@@ -576,3 +576,22 @@ func runGitTest(t *testing.T, repository string, args ...string) string {
 
 	return string(output)
 }
+
+func TestProfileCache(t *testing.T) {
+	tests := []struct {
+		mode     string
+		wantKey  string
+		wantSeed bool
+	}{
+		{mode: "cold", wantKey: "cpu-profile"},
+		{mode: "warm", wantKey: "cpu-profile-warm", wantSeed: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			key, seed := profileCache("cpu-profile", tt.mode)
+			if key != tt.wantKey || seed != tt.wantSeed {
+				t.Errorf("profileCache(cpu-profile, %s) = %q, %t; want %q, %t", tt.mode, key, seed, tt.wantKey, tt.wantSeed)
+			}
+		})
+	}
+}
