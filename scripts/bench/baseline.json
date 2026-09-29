@@ -23,7 +23,7 @@
       "packages": ["./api/..."],
       "profile_module": ".",
       "edit": {
-        "file": "pkg/util/proto/proto.go",
+        "file": "api/system/v1alpha1/datasource_helpers.go",
         "append": "// golangci-bench edit {{N}}"
       }
     },
@@ -41,6 +41,11 @@
     {
       "name": "configured",
       "use_config": true
+    },
+    {
+      "name": "configured-new",
+      "use_config": true,
+      "args": ["--new-from-rev=HEAD"]
     },
     {
       "name": "goanalysis",
