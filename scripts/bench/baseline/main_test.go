@@ -645,6 +645,10 @@ func TestWorkloadEditorRestoresOriginal(t *testing.T) {
 	if err := os.WriteFile(path, []byte("package a\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	workload := &preparedWorkload{
 		workload: workload{Edit: &edit{File: "pkg/a.go", Append: "// edit {{N}}"}},
 		Root:     root,
@@ -677,7 +681,7 @@ func TestWorkloadEditorRestoresOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "package a\n" || info.Mode().Perm() != 0o600 {
-		t.Errorf("restored %q with mode %v, want original content and 0600", got, info.Mode().Perm())
+	if string(got) != "package a\n" || info.Mode().Perm() != before.Mode().Perm() {
+		t.Errorf("restored %q with mode %v, want original content and mode %v", got, info.Mode().Perm(), before.Mode().Perm())
 	}
 }

@@ -1730,7 +1730,7 @@ func (r *runner) runProfiles() error {
 						if seed {
 							if _, err := r.execute(
 								bin, workload, target, scenario, r.opts.ProfileConcurrency,
-								0, mode, "warm-seed", cacheDir, "",
+								0, mode, profile.purpose+"-seed", cacheDir, "",
 							); err != nil {
 								return err
 							}
