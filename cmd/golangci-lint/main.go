@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"math"
 	"fmt"
 	"os"
 	"regexp"
@@ -22,6 +23,13 @@ var (
 )
 
 func main() {
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(400)
+		if limit := debug.SetMemoryLimit(-1); limit != math.MaxInt64 {
+			debug.SetMemoryLimit(limit / 4 * 3)
+		}
+	}
+
 	info := createBuildInfo()
 	if handled, exitCode, err := commands.TryExecuteWorker(info); handled {
 		if err != nil {
