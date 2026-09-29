@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/golangci/revgrep"
 
@@ -25,23 +26,11 @@ var _ Processor = (*Diff)(nil)
 //
 // Warning: it doesn't use `path-prefix` option.
 type Diff struct {
-	onlyNew       bool
-	fromRev       string
-	fromMergeBase string
-	patchFilePath string
-	wholeFiles    bool
-	patch         string
+	cfg *config.Issues
 }
 
 func NewDiff(cfg *config.Issues) *Diff {
-	return &Diff{
-		onlyNew:       cfg.Diff,
-		fromRev:       cfg.DiffFromRevision,
-		fromMergeBase: cfg.DiffFromMergeBase,
-		patchFilePath: cfg.DiffPatchFilePath,
-		wholeFiles:    cfg.WholeFiles,
-		patch:         os.Getenv(envGolangciDiffProcessorPatch),
-	}
+	return &Diff{cfg: cfg}
 }
 
 func (*Diff) Name() string {
@@ -49,39 +38,16 @@ func (*Diff) Name() string {
 }
 
 func (p *Diff) Process(issues []*result.Issue) ([]*result.Issue, error) {
-	if !p.onlyNew && p.fromRev == "" && p.fromMergeBase == "" && p.patchFilePath == "" && p.patch == "" {
-		return issues, nil
-	}
-
-	var patchReader io.Reader
-	switch {
-	case p.patchFilePath != "":
-		patch, err := os.ReadFile(p.patchFilePath)
-		if err != nil {
-			return nil, fmt.Errorf("can't read from patch file %s: %w", p.patchFilePath, err)
-		}
-
-		patchReader = bytes.NewReader(patch)
-
-	case p.patch != "":
-		patchReader = strings.NewReader(p.patch)
-	}
-
-	checker := revgrep.Checker{
-		Patch:        patchReader,
-		RevisionFrom: p.fromRev,
-		MergeBase:    p.fromMergeBase,
-		WholeFiles:   p.wholeFiles,
-	}
-
-	err := checker.Prepare(context.Background())
+	checker, err := PrepareDiff(p.cfg)
 	if err != nil {
-		return nil, fmt.Errorf("can't prepare diff by revgrep: %w", err)
+		return nil, err
+	}
+	if checker == nil {
+		return issues, nil
 	}
 
 	return transformIssues(issues, func(issue *result.Issue) *result.Issue {
 		if issue.FromLinter == typeCheckName {
-			// Never hide typechecking errors.
 			return issue
 		}
 
@@ -98,3 +64,61 @@ func (p *Diff) Process(issues []*result.Issue) ([]*result.Issue, error) {
 }
 
 func (*Diff) Finish() {}
+
+type preparedDiff struct {
+	once    sync.Once
+	checker *revgrep.Checker
+	err     error
+}
+
+// preparedDiffs maps each *config.Issues to its *preparedDiff.
+var preparedDiffs sync.Map
+
+// PrepareDiff returns the changes selected by the `new`, `new-from-rev`, `new-from-merge-base`
+// and `new-from-patch` options, or nil when none is set.
+// The result is computed once per configuration, so package selection and issue filtering
+// see the same changes.
+func PrepareDiff(cfg *config.Issues) (*revgrep.Checker, error) {
+	value, _ := preparedDiffs.LoadOrStore(cfg, &preparedDiff{})
+	prepared := value.(*preparedDiff)
+
+	prepared.once.Do(func() {
+		prepared.checker, prepared.err = prepareDiff(cfg)
+	})
+
+	return prepared.checker, prepared.err
+}
+
+func prepareDiff(cfg *config.Issues) (*revgrep.Checker, error) {
+	patch := os.Getenv(envGolangciDiffProcessorPatch)
+	if !cfg.Diff && cfg.DiffFromRevision == "" && cfg.DiffFromMergeBase == "" && cfg.DiffPatchFilePath == "" && patch == "" {
+		return nil, nil
+	}
+
+	var patchReader io.Reader
+	switch {
+	case cfg.DiffPatchFilePath != "":
+		content, err := os.ReadFile(cfg.DiffPatchFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("can't read from patch file %s: %w", cfg.DiffPatchFilePath, err)
+		}
+
+		patchReader = bytes.NewReader(content)
+
+	case patch != "":
+		patchReader = strings.NewReader(patch)
+	}
+
+	checker := &revgrep.Checker{
+		Patch:        patchReader,
+		RevisionFrom: cfg.DiffFromRevision,
+		MergeBase:    cfg.DiffFromMergeBase,
+		WholeFiles:   cfg.WholeFiles,
+	}
+
+	if err := checker.Prepare(context.Background()); err != nil {
+		return nil, fmt.Errorf("can't prepare diff by revgrep: %w", err)
+	}
+
+	return checker, nil
+}

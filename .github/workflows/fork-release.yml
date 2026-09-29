@@ -31,7 +31,7 @@ jobs:
           cache: false
       - name: Check replaced modules match required versions
         run: |
-          mods="$(go list -m -f '{{.Path}} {{.Version}} {{with .Replace}}{{.Version}}{{end}}' golang.org/x/tools honnef.co/go/tools)"
+          mods="$(go list -m -f '{{.Path}} {{.Version}} {{with .Replace}}{{.Version}}{{end}}' golang.org/x/tools honnef.co/go/tools github.com/golangci/revgrep)"
           status=0
           while read -r path required replaced; do
             case "${replaced}" in
