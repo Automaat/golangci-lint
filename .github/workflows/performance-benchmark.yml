@@ -41,6 +41,7 @@ on:
         options:
           - cold
           - warm
+          - edit
           - cold,warm
       capture_profiles:
         description: Capture CPU, heap, and trace profiles

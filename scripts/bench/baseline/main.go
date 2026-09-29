@@ -34,6 +34,8 @@ import (
 
 const (
 	cacheModeWarm = "warm"
+	cacheModeEdit = "edit"
+	editCounter   = "{{N}}"
 
 	schemaVersion               = 1
 	defaultProfileConcurrency   = 4
@@ -83,6 +85,15 @@ type workload struct {
 	Packages      []string `json:"packages,omitempty"`
 	ProfileModule string   `json:"profile_module,omitempty"`
 	Tests         *bool    `json:"tests,omitempty"`
+	Edit          *edit    `json:"edit,omitempty"`
+}
+
+// edit describes the source change applied before each edit-mode run: Append,
+// with {{N}} replaced by the iteration, is added to File so that every run
+// sees a state its cache has not seen.
+type edit struct {
+	File   string `json:"file"`
+	Append string `json:"append"`
 }
 
 type scenario struct {
@@ -548,9 +559,36 @@ func validateWorkloads(workloads []workload) error {
 		if _, err := hex.DecodeString(item.Revision); err != nil {
 			return fmt.Errorf("workload %q revision: %w", item.Name, err)
 		}
+		if err := validateEdit(item.Edit); err != nil {
+			return fmt.Errorf("workload %q edit: %w", item.Name, err)
+		}
 	}
 
 	return nil
+}
+
+func validateEdit(item *edit) error {
+	if item == nil {
+		return nil
+	}
+	if item.File == "" || filepath.IsAbs(item.File) || !filepath.IsLocal(item.File) {
+		return fmt.Errorf("file %q must be a relative path inside the workload", item.File)
+	}
+	if !strings.Contains(item.Append, editCounter) {
+		return fmt.Errorf("append must contain %s", editCounter)
+	}
+
+	return nil
+}
+
+// editedSource returns original with the edit for iteration n appended.
+func editedSource(original []byte, item *edit, n int) []byte {
+	line := strings.ReplaceAll(item.Append, editCounter, strconv.Itoa(n))
+	out := slices.Clone(original)
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		out = append(out, '\n')
+	}
+	return append(append(out, line...), '\n')
 }
 
 func validateScenarios(scenarios []scenario) error {
@@ -684,7 +722,7 @@ func parseCacheModes(raw string) ([]string, error) {
 	var modes []string
 	for _, value := range strings.Split(raw, ",") {
 		mode := strings.TrimSpace(value)
-		if mode != "cold" && mode != cacheModeWarm {
+		if mode != "cold" && mode != cacheModeWarm && mode != cacheModeEdit {
 			return nil, fmt.Errorf("invalid cache mode %q", mode)
 		}
 		if !slices.Contains(modes, mode) {
@@ -1050,26 +1088,44 @@ func (r *runner) runTimingMatrix(concurrency []int, runs int) error {
 							}
 						}
 						for _, mode := range modes {
-							if mode == cacheModeWarm {
-								cacheDir := r.cacheDir(bin, workload, target, scenario, value, cacheModeWarm)
-								if _, err := r.execute(bin, workload, target, scenario, value, 0, mode, "warm-seed", cacheDir, ""); err != nil {
-									return err
-								}
-							}
-							for iteration := 1; iteration <= runs; iteration++ {
-								cacheKey := mode
-								if mode == "cold" {
-									cacheKey = fmt.Sprintf("cold-%d", iteration)
-								}
-								cacheDir := r.cacheDir(bin, workload, target, scenario, value, cacheKey)
-								if _, err := r.execute(bin, workload, target, scenario, value, iteration, mode, "timing", cacheDir, ""); err != nil {
-									return err
-								}
+							if err := r.runModeTimings(bin, workload, target, scenario, value, runs, mode); err != nil {
+								return err
 							}
 						}
 					}
 				}
 			}
+		}
+	}
+
+	return nil
+}
+
+func (r *runner) runModeTimings(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency, runs int,
+	mode string,
+) error {
+	if mode == cacheModeEdit {
+		return r.runEditTimings(bin, workload, target, scenario, concurrency, runs)
+	}
+	if mode == cacheModeWarm {
+		cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, cacheModeWarm)
+		if _, err := r.execute(bin, workload, target, scenario, concurrency, 0, mode, "warm-seed", cacheDir, ""); err != nil {
+			return err
+		}
+	}
+	for iteration := 1; iteration <= runs; iteration++ {
+		cacheKey := mode
+		if mode == "cold" {
+			cacheKey = fmt.Sprintf("cold-%d", iteration)
+		}
+		cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, cacheKey)
+		if _, err := r.execute(bin, workload, target, scenario, concurrency, iteration, mode, "timing", cacheDir, ""); err != nil {
+			return err
 		}
 	}
 
@@ -1665,6 +1721,9 @@ func (r *runner) runProfiles() error {
 			scenario := &r.scenarios[scenarioIndex]
 			for _, bin := range r.binaries {
 				for _, mode := range modes {
+					if mode == cacheModeEdit && workload.Edit == nil {
+						continue
+					}
 					for _, profile := range profiles {
 						cacheKey, seed := profileCache(profile.purpose, mode)
 						cacheDir := r.cacheDir(bin, workload, target, scenario, r.opts.ProfileConcurrency, cacheKey)
@@ -1679,10 +1738,7 @@ func (r *runner) runProfiles() error {
 						base := artifactBase(bin, workload, target, scenario, r.opts.ProfileConcurrency, 1, mode, profile.purpose)
 						artifact := filepath.Join(r.outDir, "profiles", base+"."+profile.ext)
 						extra := append(slices.Clone(profile.env), profile.flag+"="+artifact)
-						if _, err := r.execute(
-							bin, workload, target, scenario, r.opts.ProfileConcurrency,
-							1, mode, profile.purpose, cacheDir, artifact, extra...,
-						); err != nil {
+						if err := r.runProfile(bin, workload, target, scenario, mode, profile.purpose, cacheDir, artifact, extra); err != nil {
 							return err
 						}
 					}
@@ -1694,12 +1750,117 @@ func (r *runner) runProfiles() error {
 	return nil
 }
 
+// runProfile executes one profiled run; edit-mode profiles run after the
+// first edit and restore the workload afterwards.
+func (r *runner) runProfile(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	mode, purpose, cacheDir, artifact string,
+	extra []string,
+) (err error) {
+	if mode == cacheModeEdit {
+		editor, editErr := newWorkloadEditor(workload)
+		if editErr != nil {
+			return editErr
+		}
+		if applyErr := editor.apply(1); applyErr != nil {
+			return applyErr
+		}
+		defer func() {
+			if restoreErr := editor.restore(); restoreErr != nil && err == nil {
+				err = restoreErr
+			}
+		}()
+	}
+
+	_, err = r.execute(bin, workload, target, scenario, r.opts.ProfileConcurrency, 1, mode, purpose, cacheDir, artifact, extra...)
+	return err
+}
+
+// runEditTimings seeds a cache on the pristine workload, then times runs that
+// each follow a fresh edit. The edited file is always restored.
+func (r *runner) runEditTimings(
+	bin binary,
+	workload *preparedWorkload,
+	target string,
+	scenario *scenario,
+	concurrency int,
+	runs int,
+) (err error) {
+	if workload.Edit == nil {
+		return nil
+	}
+	editor, err := newWorkloadEditor(workload)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if restoreErr := editor.restore(); restoreErr != nil && err == nil {
+			err = restoreErr
+		}
+	}()
+
+	cacheDir := r.cacheDir(bin, workload, target, scenario, concurrency, cacheModeEdit)
+	if _, err := r.execute(bin, workload, target, scenario, concurrency, 0, cacheModeEdit, "warm-seed", cacheDir, ""); err != nil {
+		return err
+	}
+	for iteration := 1; iteration <= runs; iteration++ {
+		if err := editor.apply(iteration); err != nil {
+			return err
+		}
+		if _, err := r.execute(bin, workload, target, scenario, concurrency, iteration, cacheModeEdit, "timing", cacheDir, ""); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// workloadEditor applies numbered edits to a workload file and restores its
+// original content.
+type workloadEditor struct {
+	spec     *edit
+	path     string
+	mode     os.FileMode
+	original []byte
+}
+
+func newWorkloadEditor(workload *preparedWorkload) (*workloadEditor, error) {
+	path, err := safeJoin(workload.Root, workload.Edit.File)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &workloadEditor{spec: workload.Edit, path: path, mode: info.Mode().Perm(), original: original}, nil
+}
+
+func (e *workloadEditor) apply(n int) error {
+	return os.WriteFile(e.path, editedSource(e.original, e.spec, n), e.mode)
+}
+
+func (e *workloadEditor) restore() error {
+	if err := os.WriteFile(e.path, e.original, e.mode); err != nil {
+		return fmt.Errorf("restore %s: %w", e.spec.File, err)
+	}
+	return nil
+}
+
 // profileCache returns the cache directory key for a profile run and whether
-// that cache must be seeded first. Warm profiles get their own seeded cache so
-// they measure the cached path rather than analysis.
+// that cache must be seeded first. Warm and edit profiles get their own seeded
+// cache so they measure the cached path rather than a full analysis.
 func profileCache(purpose, mode string) (key string, seed bool) {
-	if mode == cacheModeWarm {
-		return purpose + "-warm", true
+	if mode == cacheModeWarm || mode == cacheModeEdit {
+		return purpose + "-" + mode, true
 	}
 	return purpose, false
 }
