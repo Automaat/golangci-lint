@@ -21,7 +21,11 @@
       "modules": ["."],
       "tests": false,
       "packages": ["./api/..."],
-      "profile_module": "."
+      "profile_module": ".",
+      "edit": {
+        "file": "pkg/util/proto/proto.go",
+        "append": "// golangci-bench edit {{N}}"
+      }
     },
     {
       "name": "multi-module",

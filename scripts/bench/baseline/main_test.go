@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -164,11 +165,11 @@ func TestParsePositiveIntsRejectsInvalidValues(t *testing.T) {
 }
 
 func TestParseCacheModes(t *testing.T) {
-	actual, err := parseCacheModes("warm,cold,warm")
+	actual, err := parseCacheModes("warm,cold,edit,warm")
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := []string{"warm", "cold"}
+	expected := []string{"warm", "cold", "edit"}
 	if !reflect.DeepEqual(actual, expected) {
 		t.Fatalf("expected %v, got %v", expected, actual)
 	}
@@ -585,6 +586,7 @@ func TestProfileCache(t *testing.T) {
 	}{
 		{mode: "cold", wantKey: "cpu-profile"},
 		{mode: "warm", wantKey: "cpu-profile-warm", wantSeed: true},
+		{mode: "edit", wantKey: "cpu-profile-edit", wantSeed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
@@ -593,5 +595,93 @@ func TestProfileCache(t *testing.T) {
 				t.Errorf("profileCache(cpu-profile, %s) = %q, %t; want %q, %t", tt.mode, key, seed, tt.wantKey, tt.wantSeed)
 			}
 		})
+	}
+}
+
+func TestValidateEdit(t *testing.T) {
+	tests := []struct {
+		desc    string
+		edit    *edit
+		wantErr bool
+	}{
+		{desc: "none", edit: nil},
+		{desc: "valid", edit: &edit{File: "pkg/a.go", Append: "// edit {{N}}"}},
+		{desc: "absolute", edit: &edit{File: "/tmp/a.go", Append: "// edit {{N}}"}, wantErr: true},
+		{desc: "escaping", edit: &edit{File: "../a.go", Append: "// edit {{N}}"}, wantErr: true},
+		{desc: "no counter", edit: &edit{File: "a.go", Append: "// edit"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			if err := validateEdit(tt.edit); (err != nil) != tt.wantErr {
+				t.Errorf("validateEdit() error = %v, wantErr %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEditedSource(t *testing.T) {
+	spec := &edit{File: "a.go", Append: "// bench edit {{N}}"}
+	tests := []struct {
+		desc, original, want string
+	}{
+		{desc: "trailing newline", original: "package a\n", want: "package a\n// bench edit 3\n"},
+		{desc: "no trailing newline", original: "package a", want: "package a\n// bench edit 3\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			if got := string(editedSource([]byte(tt.original), spec, 3)); got != tt.want {
+				t.Errorf("editedSource() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWorkloadEditorRestoresOriginal(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "pkg", "a.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("package a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload := &preparedWorkload{
+		workload: workload{Edit: &edit{File: "pkg/a.go", Append: "// edit {{N}}"}},
+		Root:     root,
+	}
+
+	editor, err := newWorkloadEditor(workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= 2; n++ {
+		if err = editor.apply(n); err != nil {
+			t.Fatal(err)
+		}
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if want := fmt.Sprintf("package a\n// edit %d\n", n); string(got) != want {
+			t.Fatalf("after apply(%d) = %q, want %q", n, got, want)
+		}
+	}
+	if err = editor.restore(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "package a\n" || info.Mode().Perm() != before.Mode().Perm() {
+		t.Errorf("restored %q with mode %v, want original content and mode %v", got, info.Mode().Perm(), before.Mode().Perm())
 	}
 }
