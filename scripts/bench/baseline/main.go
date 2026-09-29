@@ -33,6 +33,8 @@ import (
 )
 
 const (
+	cacheModeWarm = "warm"
+
 	schemaVersion               = 1
 	defaultProfileConcurrency   = 4
 	fullCommitSHALength         = 40
@@ -682,7 +684,7 @@ func parseCacheModes(raw string) ([]string, error) {
 	var modes []string
 	for _, value := range strings.Split(raw, ",") {
 		mode := strings.TrimSpace(value)
-		if mode != "cold" && mode != "warm" {
+		if mode != "cold" && mode != cacheModeWarm {
 			return nil, fmt.Errorf("invalid cache mode %q", mode)
 		}
 		if !slices.Contains(modes, mode) {
@@ -1048,8 +1050,8 @@ func (r *runner) runTimingMatrix(concurrency []int, runs int) error {
 							}
 						}
 						for _, mode := range modes {
-							if mode == "warm" {
-								cacheDir := r.cacheDir(bin, workload, target, scenario, value, "warm")
+							if mode == cacheModeWarm {
+								cacheDir := r.cacheDir(bin, workload, target, scenario, value, cacheModeWarm)
 								if _, err := r.execute(bin, workload, target, scenario, value, 0, mode, "warm-seed", cacheDir, ""); err != nil {
 									return err
 								}
@@ -1312,7 +1314,7 @@ func (r *runner) runCorruptedCacheCompatibility(
 		purpose := "compatibility-corrupted-cache"
 		artifact := r.compatibilityArtifact(bin, workload, target, scenario, concurrency, purpose)
 		stats, err := r.execute(
-			bin, workload, target, scenario, concurrency, 1, "warm", purpose, cacheDir, artifact,
+			bin, workload, target, scenario, concurrency, 1, cacheModeWarm, purpose, cacheDir, artifact,
 			compatibilityOutputArgs(artifact)...,
 		)
 		if err != nil {
@@ -1638,6 +1640,7 @@ func compatibilityOutputArgs(artifact string) []string {
 }
 
 func (r *runner) runProfiles() error {
+	modes, _ := parseCacheModes(r.opts.CacheMode)
 	profiles := []struct {
 		purpose string
 		flag    string
@@ -1661,16 +1664,27 @@ func (r *runner) runProfiles() error {
 		for scenarioIndex := range r.scenarios {
 			scenario := &r.scenarios[scenarioIndex]
 			for _, bin := range r.binaries {
-				for _, profile := range profiles {
-					base := artifactBase(bin, workload, target, scenario, r.opts.ProfileConcurrency, 1, "cold", profile.purpose)
-					artifact := filepath.Join(r.outDir, "profiles", base+"."+profile.ext)
-					cacheDir := r.cacheDir(bin, workload, target, scenario, r.opts.ProfileConcurrency, profile.purpose)
-					extra := append(slices.Clone(profile.env), profile.flag+"="+artifact)
-					if _, err := r.execute(
-						bin, workload, target, scenario, r.opts.ProfileConcurrency,
-						1, "cold", profile.purpose, cacheDir, artifact, extra...,
-					); err != nil {
-						return err
+				for _, mode := range modes {
+					for _, profile := range profiles {
+						cacheKey, seed := profileCache(profile.purpose, mode)
+						cacheDir := r.cacheDir(bin, workload, target, scenario, r.opts.ProfileConcurrency, cacheKey)
+						if seed {
+							if _, err := r.execute(
+								bin, workload, target, scenario, r.opts.ProfileConcurrency,
+								0, mode, "warm-seed", cacheDir, "",
+							); err != nil {
+								return err
+							}
+						}
+						base := artifactBase(bin, workload, target, scenario, r.opts.ProfileConcurrency, 1, mode, profile.purpose)
+						artifact := filepath.Join(r.outDir, "profiles", base+"."+profile.ext)
+						extra := append(slices.Clone(profile.env), profile.flag+"="+artifact)
+						if _, err := r.execute(
+							bin, workload, target, scenario, r.opts.ProfileConcurrency,
+							1, mode, profile.purpose, cacheDir, artifact, extra...,
+						); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -1678,6 +1692,16 @@ func (r *runner) runProfiles() error {
 	}
 
 	return nil
+}
+
+// profileCache returns the cache directory key for a profile run and whether
+// that cache must be seeded first. Warm profiles get their own seeded cache so
+// they measure the cached path rather than analysis.
+func profileCache(purpose, mode string) (key string, seed bool) {
+	if mode == cacheModeWarm {
+		return purpose + "-warm", true
+	}
+	return purpose, false
 }
 
 func (r *runner) cacheDir(
