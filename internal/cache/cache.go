@@ -166,17 +166,8 @@ func (c *Cache) computePkgHash(pkg *packages.Package) (hashResults, error) {
 
 	fmt.Fprintf(key, "pkgpath %s\n", pkg.PkgPath)
 
-	for _, f := range slices.Concat(pkg.CompiledGoFiles, pkg.IgnoredFiles) {
-		h, fErr := c.fileHash(f)
-		if fErr != nil {
-			return nil, fmt.Errorf("failed to calculate file %s hash: %w", f, fErr)
-		}
-
-		if rel, ok := toRelativePath(pkg.Module, f); ok {
-			f = pkg.Module.Path + "/" + rel
-		}
-
-		fmt.Fprintf(key, "file %s %x\n", f, h)
+	if err := c.hashSources(key, pkg); err != nil {
+		return nil, err
 	}
 
 	curSum := key.Sum()
@@ -201,6 +192,33 @@ func (c *Cache) computePkgHash(pkg *packages.Package) (hashResults, error) {
 	hashRes[HashModeNeedAllDeps] = hex.EncodeToString(curSum[:])
 
 	return hashRes, nil
+}
+
+// hashSources writes the identity of the package's own sources.
+// Packages outside the edited modules (stdlib, module cache) use the build ID
+// that go list already computed from their inputs, instead of re-hashing
+// every file on each run; their directories are stable, and their ignored
+// files cannot affect analysis results.
+func (c *Cache) hashSources(key *cache.Hash, pkg *packages.Package) error {
+	if pkg.BuildID != "" && !isCurrentModule(pkg.Module) {
+		fmt.Fprintf(key, "buildid %s\n", pkg.BuildID)
+		return nil
+	}
+
+	for _, f := range slices.Concat(pkg.CompiledGoFiles, pkg.IgnoredFiles) {
+		h, err := c.fileHash(f)
+		if err != nil {
+			return fmt.Errorf("failed to calculate file %s hash: %w", f, err)
+		}
+
+		if rel, ok := toRelativePath(pkg.Module, f); ok {
+			f = pkg.Module.Path + "/" + rel
+		}
+
+		fmt.Fprintf(key, "file %s %x\n", f, h)
+	}
+
+	return nil
 }
 
 func (c *Cache) computeDepsHash(depMode HashMode, imps []*packages.Package, key *cache.Hash) error {

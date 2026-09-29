@@ -156,3 +156,55 @@ func TestCache_computeHash(t *testing.T) {
 	assert.Equal(t, "b1aef902a0619b5cbfc2d6e2e91a73dd58dd448e58274b2d7a5ff8efd97aefa4", results[HashModeNeedDirectDeps])
 	assert.Equal(t, "9c602ef861197b6807e82c99caa7c4042eb03c1a92886303fb02893744355131", results[HashModeNeedAllDeps])
 }
+
+func TestCache_computeHash_buildID(t *testing.T) {
+	missing := []string{"./testdata/does-not-exist.go"}
+	dependency := &packages.Module{Path: "example.com/dep", Version: "v1.0.0", Dir: "/modcache/example.com/dep@v1.0.0"}
+	workspace := &packages.Module{Path: "example.com/main", Dir: "./testdata", Main: true}
+
+	tests := []struct {
+		desc    string
+		pkg     *packages.Package
+		wantErr bool
+		otherID string
+	}{
+		{
+			desc:    "stdlib uses build ID without reading files",
+			pkg:     &packages.Package{PkgPath: "fmt", CompiledGoFiles: missing, IgnoredFiles: missing, BuildID: "a/b"},
+			otherID: "c/d",
+		},
+		{
+			desc:    "module cache dependency uses build ID",
+			pkg:     &packages.Package{PkgPath: "example.com/dep", Module: dependency, CompiledGoFiles: missing, BuildID: "a/b"},
+			otherID: "c/d",
+		},
+		{
+			desc:    "workspace package hashes files",
+			pkg:     &packages.Package{PkgPath: "example.com/main", Module: workspace, CompiledGoFiles: missing, BuildID: "a/b"},
+			wantErr: true,
+		},
+		{
+			desc:    "dependency without build ID hashes files",
+			pkg:     &packages.Package{PkgPath: "example.com/dep", Module: dependency, CompiledGoFiles: missing},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.desc, func(t *testing.T) {
+			results, err := setupCache(t).computePkgHash(test.pkg)
+			if test.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			other := *test.pkg
+			other.BuildID = test.otherID
+			otherResults, err := setupCache(t).computePkgHash(&other)
+			require.NoError(t, err)
+
+			assert.NotEqual(t, results[HashModeNeedOnlySelf], otherResults[HashModeNeedOnlySelf])
+		})
+	}
+}
