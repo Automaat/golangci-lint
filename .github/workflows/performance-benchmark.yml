@@ -28,7 +28,20 @@ on:
         type: choice
         options:
           - goanalysis
+          - configured
+          - govet
+          - staticcheck
+          - unused
           - staticcheck-unused
+      cache_mode:
+        description: Cache state before each timed run
+        required: true
+        default: cold
+        type: choice
+        options:
+          - cold
+          - warm
+          - cold,warm
       capture_profiles:
         description: Capture CPU, heap, and trace profiles
         required: true
@@ -55,6 +68,7 @@ jobs:
       BASELINE_REF: ${{ inputs.baseline_ref }}
       WORKLOAD: ${{ inputs.workload }}
       SCENARIO: ${{ inputs.scenario }}
+      CACHE_MODE: ${{ inputs.cache_mode }}
       CAPTURE_PROFILES: ${{ inputs.capture_profiles }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,7 +107,7 @@ jobs:
             --scenario "$SCENARIO"
             --concurrency 2
             --profile-concurrency 2
-            --cache-mode cold
+            --cache-mode "$CACHE_MODE"
             --runs 7
             --run-timeout 2m
             --max-rss-mib 1024
@@ -114,11 +128,22 @@ jobs:
             --out dist/bench/hosted/baseline-first \
             "${common_args[@]}"
 
+      - name: Summarize results
+        if: always()
+        run: |
+          {
+            echo "## ${WORKLOAD} / ${SCENARIO} (${CACHE_MODE})"
+            echo
+            echo "Candidate \`${CANDIDATE_REF}\` vs baseline \`${BASELINE_REF}\`."
+            echo
+            go run ./scripts/bench/summary dist/bench/hosted
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: performance-${{ inputs.workload }}-${{ inputs.scenario }}
+          name: performance-${{ inputs.workload }}-${{ inputs.scenario }}-${{ inputs.cache_mode == 'cold,warm' && 'cold-warm' || inputs.cache_mode }}
           path: |
             dist/bench/bin/pair.json
             dist/bench/hosted
