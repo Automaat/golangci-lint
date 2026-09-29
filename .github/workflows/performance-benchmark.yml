@@ -29,6 +29,7 @@ on:
         options:
           - goanalysis
           - configured
+          - configured-new
           - govet
           - staticcheck
           - unused
