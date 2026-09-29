@@ -240,6 +240,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace golang.org/x/tools => github.com/Automaat/tools v0.50.0-automaat.2
+replace golang.org/x/tools => github.com/Automaat/tools v0.50.0-automaat.3
 
 replace honnef.co/go/tools => github.com/Automaat/go-tools v0.8.1-automaat.3
