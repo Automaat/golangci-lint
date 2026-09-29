@@ -64,7 +64,9 @@ func TestChangedPackagesResolvesSymlinks(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(realDir, "a"), 0o750))
 
 	link := filepath.Join(t.TempDir(), "link")
-	require.NoError(t, os.Symlink(realDir, link))
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
 
 	pkg := &packages.Package{PkgPath: "a", GoFiles: []string{filepath.Join(realDir, "a", "a.go")}}
 
